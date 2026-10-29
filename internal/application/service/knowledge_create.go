@@ -326,8 +326,31 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	title string, tagIDs []string, channel string,
 	processOverrides *types.KnowledgeProcessOverrides,
 ) (*types.Knowledge, error) {
-	return s.createKnowledgeFromURL(ctx, kbID, rawURL, fileName, fileType, enableMultimodel,
+	knowledge, _, err := s.CreateKnowledgeFromURLWithReport(ctx, kbID, rawURL, fileName, fileType,
+		enableMultimodel, title, tagIDs, channel, processOverrides)
+	return knowledge, err
+}
+
+// CreateKnowledgeFromURLWithReport is CreateKnowledgeFromURL with archive
+// expansion: a .zip file URL never becomes a single knowledge record, so the
+// caller receives the per-document import report instead (knowledge is nil).
+// Re-import/replace flows keep the single-knowledge contract and reject zip
+// URLs with a clear error.
+func (s *knowledgeService) CreateKnowledgeFromURLWithReport(ctx context.Context,
+	kbID string, rawURL string, fileName string, fileType string, enableMultimodel *bool,
+	title string, tagIDs []string, channel string,
+	processOverrides *types.KnowledgeProcessOverrides,
+) (*types.Knowledge, *types.ArchiveImportReport, error) {
+	// Only a fresh import expands an archive; a re-import has a single row to
+	// replace and no archive was ever stored for it.
+	if isFileURL(rawURL, fileName, fileType) && isZipURLRequest(rawURL, fileName, fileType) {
+		report, err := s.CreateKnowledgeFromArchiveURL(ctx, kbID, rawURL, fileName,
+			enableMultimodel, title, tagIDs, channel, processOverrides)
+		return nil, report, err
+	}
+	knowledge, err := s.createKnowledgeFromURL(ctx, kbID, rawURL, fileName, fileType, enableMultimodel,
 		title, tagIDs, channel, processOverrides, nil)
+	return knowledge, nil, err
 }
 
 func (s *knowledgeService) createKnowledgeFromURL(ctx context.Context,
@@ -601,6 +624,12 @@ func (s *knowledgeService) createKnowledgeFromFileURLWithReplacement(
 		fileType = getFileType(fileName)
 	}
 	fileType = normalizeFileExtension(fileType)
+	if secutils.IsZipArchiveExtension(fileType) {
+		// A zip expands into several documents, so it has no single row to
+		// create or replace in this flow. Fresh imports route to the archive
+		// expansion before reaching here (CreateKnowledgeFromURLWithReport).
+		return nil, werrors.NewBadRequestError("压缩包不支持作为单个文档导入或重新导入，请直接上传 zip 文件")
+	}
 
 	// Use title as display name if fileName is still empty
 	displayName := fileName

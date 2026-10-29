@@ -47,8 +47,25 @@ const actionMeta: Record<RowAction, { icon: string; label: string }> = {
 
 /** Failure reason, shown after the phase label and in full on hover. */
 const reason = computed(() => {
-  if (phase.value !== 'failed') return ''
+  if (phase.value !== 'failed') {
+    // Archive imports stay 'ready': their caveats (missing images, caps)
+    // live in the per-document report shown in the meta line.
+    if (phase.value === 'ready' && props.item.archive?.warnings.length) {
+      return props.item.archive.warnings.join('\n')
+    }
+    return ''
+  }
   return (props.item.transfer === 'failed' ? props.item.error : props.item.parseError) || ''
+})
+
+const archiveMeta = computed(() => {
+  const archive = props.item.archive
+  if (!archive) return ''
+  const parts = [t('uploadTasks.archiveCreated', { created: archive.created })]
+  if (archive.duplicates > 0) parts.push(t('uploadTasks.archiveDuplicates', { count: archive.duplicates }))
+  if (archive.failed > 0) parts.push(t('uploadTasks.archiveFailed', { count: archive.failed }))
+  if (archive.totalWarnings > 0) parts.push(t('uploadTasks.archiveWarnings', { count: archive.totalWarnings }))
+  return parts.join(' · ')
 })
 
 const meta = computed(() => {
@@ -63,6 +80,7 @@ const meta = computed(() => {
     case 'parsing':
       return t(item.parseStatus === 'processing' ? 'uploadTasks.phaseParsing' : 'uploadTasks.phasePending')
     case 'ready':
+      if (item.archive) return archiveMeta.value
       return t(item.parseStatus === 'finalizing' ? 'uploadTasks.phaseFinalizing' : 'uploadTasks.phaseReady')
     case 'failed': {
       const label = t(item.transfer === 'failed' ? 'uploadTasks.phaseUploadFailed' : 'uploadTasks.phaseParseFailed')

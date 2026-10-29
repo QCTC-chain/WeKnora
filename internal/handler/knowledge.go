@@ -6,7 +6,9 @@ import (
 	goerrors "errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -334,10 +336,17 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 	// container startup, so a UI knob would silently mismatch).
 	maxSizeMB := utils.GetMaxFileSizeMB()
 	maxSize := maxSizeMB * 1024 * 1024
+	// Zip knowledge packages expand into many documents, so they get their
+	// own, larger budget (ARCHIVE_MAX_SIZE_MB, 200MB default). The pre-parse
+	// body cap admits both limits; the per-extension checks after the parse
+	// enforce each one, so plain files still stop at MAX_FILE_SIZE.
+	if archiveMax := utils.GetMaxArchiveSize(); archiveMax > maxSize {
+		maxSize = archiveMax
+	}
 	// Capped before the multipart parse, not after: FormFile buffers the whole
 	// body first, so the size check below only ever sees an upload we already
-	// accepted. nginx location /api/ still enforces MAX_FILE_SIZE; this is the
-	// same cap for requests that reach the app without that proxy.
+	// accepted. nginx location /api/ still enforces its client_max_body_size;
+	// this is the same cap for requests that reach the app without that proxy.
 	limitUploadBody(c, maxSize)
 
 	// Get the uploaded file
@@ -417,6 +426,16 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 
 	channel := c.PostForm("channel")
 
+	// Zip archives are expanded by a dedicated import path: one knowledge
+	// entry per Markdown document in the package, with the package's images
+	// stored and the references rewritten. All other upload semantics —
+	// metadata, multimodel, tags, process config — apply unchanged. Checked
+	// after the form fields are parsed so the branch can reuse them.
+	if utils.IsZipArchiveExtension(path.Ext(file.Filename)) {
+		h.createKnowledgeFromArchive(c, ctx, kbID, file, metadata, enableMultimodel, tagIDs, channel, processOverrides)
+		return
+	}
+
 	// Reject malformed .json at the HTTP boundary so users get 400 immediately.
 	// Kept out of CreateKnowledgeFromFile so datasource sync / IM keep creating
 	// a knowledge row that fails in async parse instead of vanishing.
@@ -457,6 +476,39 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    knowledge,
+	})
+}
+
+// createKnowledgeFromArchive handles the .zip branch of the file-upload
+// endpoint: it expands the package into one knowledge per Markdown document
+// and answers with a per-document report instead of a single knowledge.
+func (h *KnowledgeHandler) createKnowledgeFromArchive(
+	c *gin.Context, ctx context.Context, kbID string, file *multipart.FileHeader,
+	metadata map[string]string, enableMultimodel *bool, tagIDs []string,
+	channel string, processOverrides *types.KnowledgeProcessOverrides,
+) {
+	metadataAny := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		metadataAny[key] = value
+	}
+	report, err := h.kgService.CreateKnowledgeFromArchive(
+		ctx, kbID, file, metadataAny, enableMultimodel, tagIDs, channel, processOverrides)
+	if err != nil {
+		// Every archive failure so far is client-input-shaped (bad zip,
+		// limits exceeded, no Markdown inside); surface it as a 400.
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		logger.ErrorWithFields(ctx, err, nil)
+		c.Error(errors.NewBadRequestError("压缩包无法导入").WithDetails(err.Error()))
+		return
+	}
+	logger.Infof(ctx, "Archive import finished for KB %s: docs=%d skipped=%d",
+		secutils.SanitizeForLog(kbID), len(report.Items), len(report.Skipped))
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    report,
 	})
 }
 
@@ -535,10 +587,22 @@ func (h *KnowledgeHandler) CreateKnowledgeFromURL(c *gin.Context) {
 		secutils.SanitizeForLog(req.URL),
 	)
 
-	// Create knowledge entry from the URL
-	knowledge, err := h.kgService.CreateKnowledgeFromURL(
+	// Create knowledge entry from the URL (zip file URLs expand into the
+	// archive import report instead of a single knowledge record).
+	knowledge, report, err := h.kgService.CreateKnowledgeFromURLWithReport(
 		ctx, kbID, req.URL, req.FileName, req.FileType, req.EnableMultimodel, req.Title, req.TagIDs, req.Channel, req.ProcessConfig,
 	)
+	if report != nil {
+		logger.Infof(ctx,
+			"Archive URL import finished, created: %d, failed: %d, skipped: %d",
+			report.CreatedCount(), report.FailedCount(), len(report.Skipped),
+		)
+		c.JSON(http.StatusCreated, gin.H{
+			"success": true,
+			"data":    report,
+		})
+		return
+	}
 	// Check for duplicate knowledge error
 	if err != nil {
 		if h.handleDuplicateKnowledgeError(c, err, knowledge, "url") {

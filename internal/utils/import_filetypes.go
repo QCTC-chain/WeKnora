@@ -31,6 +31,16 @@ func NormalizeImportExtension(ext string) string {
 	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(ext), "."))
 }
 
+// IsZipArchiveExtension reports whether a filename carries a .zip extension.
+// Zip archives are expanded by the direct-upload path into one knowledge entry
+// per Markdown document (see the archive import service); the shared
+// supportedImportFileExtensions set is deliberately NOT extended, so URL
+// import and data-source connectors keep rejecting archives until a
+// worker-side expansion exists for them too.
+func IsZipArchiveExtension(ext string) bool {
+	return NormalizeImportExtension(ext) == "zip"
+}
+
 // IsSupportedImportExtension reports whether a bare extension can be imported.
 func IsSupportedImportExtension(ext string) bool {
 	ext = NormalizeImportExtension(ext)

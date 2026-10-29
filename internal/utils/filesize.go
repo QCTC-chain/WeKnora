@@ -71,3 +71,21 @@ func envSizeMB(key string, fallback int64) int64 {
 	}
 	return fallback
 }
+
+const defaultMaxArchiveSizeMB = 200
+
+// GetMaxArchiveSize returns the maximum size in bytes for a .zip knowledge
+// archive upload (a package of Markdown documents plus their images).
+// ARCHIVE_MAX_SIZE_MB defaults to 200. Like MAX_FILE_SIZE_MB this is a
+// deploy-time-only knob: the frontend nginx client_max_body_size must be
+// raised in lockstep or oversized archives are cut off by the proxy before
+// the application ever sees them.
+func GetMaxArchiveSize() int64 {
+	return GetMaxArchiveSizeMB() * 1024 * 1024
+}
+
+// GetMaxArchiveSizeMB returns the archive upload cap in MB. Same caveat as
+// GetMaxArchiveSize — deploy-time only.
+func GetMaxArchiveSizeMB() int64 {
+	return envSizeMB("ARCHIVE_MAX_SIZE_MB", defaultMaxArchiveSizeMB)
+}

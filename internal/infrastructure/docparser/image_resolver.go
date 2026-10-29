@@ -312,8 +312,11 @@ func extFromMime(mime string) string {
 }
 
 // isProviderScheme checks if the path uses a provider:// scheme (local://, minio://, cos://, tos://).
+// resource:// counts as one: references carrying it are already stored and
+// must be skipped wherever original relative paths are being resolved, which
+// is what makes re-parsing a rewritten archive document a no-op.
 func isProviderScheme(p string) bool {
-	for _, prefix := range []string{"local://", "minio://", "cos://", "tos://", "s3://", "obs://"} {
+	for _, prefix := range []string{"local://", "minio://", "cos://", "tos://", "s3://", "obs://", "resource://"} {
 		if strings.HasPrefix(p, prefix) {
 			return true
 		}

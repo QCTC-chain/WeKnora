@@ -22,6 +22,8 @@ export interface UploadItem {
   error?: string
   /** Knowledge created by this upload, or the existing one for a duplicate. */
   knowledgeId?: string
+  /** Per-document counts when this upload was a .zip knowledge package. */
+  archive?: ArchiveImportSummary
   /** Backend parse_status once uploaded; 'deleted' when the row disappeared. */
   parseStatus?: string
   parseError?: string
@@ -214,10 +216,58 @@ export function pickNextToStart<T extends UploadItem>(
   return picked
 }
 
+/** The per-document report the upload endpoint returns for a .zip package. */
+export interface ArchiveImportItemReport {
+  knowledge_id?: string
+  title: string
+  status: 'created' | 'duplicate' | 'failed' | 'skipped'
+  images_stored?: number
+  images_missing?: number
+  warnings?: string[]
+  error?: string
+}
+
+/** Counts behind one archive row in the upload panel. */
+export interface ArchiveImportSummary {
+  created: number
+  duplicates: number
+  failed: number
+  skipped: number
+  /** Missing-image and limit warnings, capped for display. */
+  warnings: string[]
+  totalWarnings: number
+}
+
+/** Warnings kept per archive row; the rest only count. */
+const MAX_ARCHIVE_WARNINGS_SHOWN = 5
+
+export function summarizeArchiveReport(report: {
+  items?: ArchiveImportItemReport[]
+  skipped?: ArchiveImportItemReport[]
+}): ArchiveImportSummary {
+  const items = Array.isArray(report?.items) ? report.items : []
+  const skipped = Array.isArray(report?.skipped) ? report.skipped : []
+  const warnings: string[] = []
+  for (const item of items) {
+    for (const warning of item.warnings || []) {
+      warnings.push(`${item.title}: ${warning}`)
+    }
+  }
+  return {
+    created: items.filter(item => item.status === 'created').length,
+    duplicates: items.filter(item => item.status === 'duplicate').length,
+    failed: items.filter(item => item.status === 'failed').length,
+    skipped: skipped.length,
+    warnings: warnings.slice(0, MAX_ARCHIVE_WARNINGS_SHOWN),
+    totalWarnings: warnings.length,
+  }
+}
+
 export type UploadOutcome =
   | { kind: 'uploaded'; knowledgeId?: string; parseStatus?: string }
   | { kind: 'duplicate'; knowledgeId?: string; message?: string }
   | { kind: 'failed'; message?: string }
+  | { kind: 'archive'; summary: ArchiveImportSummary }
 
 /**
  * Classify a resolved or rejected upload call. request.ts rejects non-2xx
@@ -228,6 +278,9 @@ export function classifyUploadResult(result: any): UploadOutcome {
   const code = result?.code ?? result?.error?.code
   if (code === 'duplicate_file') {
     return { kind: 'duplicate', knowledgeId: result?.data?.id, message: result?.message }
+  }
+  if (result?.success === true && result?.data?.type === 'archive') {
+    return { kind: 'archive', summary: summarizeArchiveReport(result.data) }
   }
   if (result?.success === true) {
     return { kind: 'uploaded', knowledgeId: result?.data?.id, parseStatus: result?.data?.parse_status }

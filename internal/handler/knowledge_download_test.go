@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -35,19 +36,22 @@ func (s *downloadKnowledgeStub) GetKnowledgeBatch(context.Context, uint64, []str
 	return s.items, nil
 }
 
-func (s *downloadKnowledgeStub) GetKnowledgeFile(ctx context.Context, id string) (io.ReadCloser, string, error) {
+func (s *downloadKnowledgeStub) GetKnowledgeFileForExport(ctx context.Context, id string) (*types.KnowledgeExportFile, error) {
 	want := s.expectedTenant
 	if want == 0 {
 		want = 7
 	}
 	if types.MustTenantIDFromContext(ctx) != want {
-		return nil, "", fmt.Errorf("错误的租户上下文")
+		return nil, fmt.Errorf("错误的租户上下文")
 	}
 	s.opened = append(s.opened, id)
 	if s.failID == id {
-		return nil, "", fmt.Errorf("模拟存储读取失败")
+		return nil, fmt.Errorf("模拟存储读取失败")
 	}
-	return io.NopCloser(strings.NewReader("原文-" + id)), s.names[id], nil
+	return &types.KnowledgeExportFile{
+		Content: io.NopCloser(strings.NewReader("原文-" + id)),
+		Name:    s.names[id],
+	}, nil
 }
 
 type downloadKBStub struct {
@@ -299,7 +303,12 @@ func TestKnowledgeDownloadArchiveEnforcesActualByteLimitAndClosesFiles(t *testin
 		file := &downloadTrackingReader{Reader: strings.NewReader("12345")}
 		err := writeKnowledgeDownloadArchive(context.Background(), &output,
 			[]knowledgeDownloadEntry{{ID: "a"}},
-			func(context.Context, string) (io.ReadCloser, string, error) { return file, "a.txt", nil }, limit)
+			func(context.Context, string) (*types.KnowledgeExportFile, error) {
+				return &types.KnowledgeExportFile{
+					Content: file,
+					Name:    "a.txt",
+				}, nil
+			}, limit)
 		if limit == 4 {
 			require.Error(t, err)
 		} else {
@@ -314,9 +323,9 @@ func TestKnowledgeDownloadArchiveStopsWhenCancelled(t *testing.T) {
 	cancel()
 	var output bytes.Buffer
 	err := writeKnowledgeDownloadArchive(ctx, &output, []knowledgeDownloadEntry{{ID: "a"}},
-		func(context.Context, string) (io.ReadCloser, string, error) {
+		func(context.Context, string) (*types.KnowledgeExportFile, error) {
 			t.Fatal("取消后不应继续读取文件")
-			return nil, "", nil
+			return nil, nil
 		}, 100)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Zero(t, output.Len())
@@ -326,9 +335,12 @@ func TestKnowledgeDownloadArchiveCancelsAfterOpenAndClosesFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	file := &downloadTrackingReader{Reader: strings.NewReader("12345")}
 	err := writeKnowledgeDownloadArchive(ctx, io.Discard, []knowledgeDownloadEntry{{ID: "a"}},
-		func(context.Context, string) (io.ReadCloser, string, error) {
+		func(context.Context, string) (*types.KnowledgeExportFile, error) {
 			cancel()
-			return file, "a.txt", nil
+			return &types.KnowledgeExportFile{
+				Content: file,
+				Name:    "a.txt",
+			}, nil
 		}, 100)
 	require.True(t, isKnowledgeDownloadCanceled(err), err)
 	require.True(t, file.closed)
@@ -390,4 +402,123 @@ func TestBatchDownloadKnowledgePreservesFolderPaths(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, reader.File, 1)
 	require.Equal(t, "docs/spec/design.md", reader.File[0].Name)
+}
+
+func TestKnowledgeDownloadArchiveRestoresImageLayout(t *testing.T) {
+	var output bytes.Buffer
+	md := "# 手册\n\n![一](resource://AbCdEfGhIjKlMnOpQrStUv)\n![二](resource://ZzYyXwWvUtSrQpOnMlKjIk)\n"
+	export := &types.KnowledgeExportFile{
+		Name:    "manual.md",
+		Content: io.NopCloser(strings.NewReader(md)),
+		Images: []types.KnowledgeExportImage{
+			{Ref: "resource://AbCdEfGhIjKlMnOpQrStUv", Name: "first.jpg", Data: []byte{0xff, 0xd8, 0x01}},
+			{Ref: "resource://ZzYyXwWvUtSrQpOnMlKjIk", Name: "second.png", Data: []byte{0x89, 0x50}},
+		},
+	}
+	err := writeKnowledgeDownloadArchive(context.Background(), &output,
+		[]knowledgeDownloadEntry{{ID: "a", FolderPath: "docs"}},
+		func(context.Context, string) (*types.KnowledgeExportFile, error) { return export, nil },
+		1<<20)
+	require.NoError(t, err)
+
+	zr, err := zip.NewReader(bytes.NewReader(output.Bytes()), int64(output.Len()))
+	require.NoError(t, err)
+	names := make(map[string]string, len(zr.File))
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		require.NoError(t, err)
+		data, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		require.NoError(t, rc.Close())
+		names[f.Name] = string(data)
+	}
+	require.Equal(t, []string{"docs/images/first.jpg", "docs/images/second.png", "docs/manual.md"}, sortedKeys(names))
+	require.Contains(t, names["docs/manual.md"], "![一](images/first.jpg)")
+	require.Contains(t, names["docs/manual.md"], "![二](images/second.png)")
+	require.False(t, strings.Contains(names["docs/manual.md"], "resource://"))
+	require.Equal(t, string([]byte{0xff, 0xd8, 0x01}), names["docs/images/first.jpg"])
+	require.Equal(t, string([]byte{0x89, 0x50}), names["docs/images/second.png"])
+}
+
+func TestKnowledgeDownloadArchiveKeepsUnresolvedExportRefs(t *testing.T) {
+	var output bytes.Buffer
+	md := "![丢失](resource://AbCdEfGhIjKlMnOpQrStUv)\n"
+	export := &types.KnowledgeExportFile{
+		Name:    "a.md",
+		Content: io.NopCloser(strings.NewReader(md)),
+		Images:  nil,
+	}
+	err := writeKnowledgeDownloadArchive(context.Background(), &output,
+		[]knowledgeDownloadEntry{{ID: "a"}},
+		func(context.Context, string) (*types.KnowledgeExportFile, error) { return export, nil },
+		1<<20)
+	require.NoError(t, err)
+	zr, err := zip.NewReader(bytes.NewReader(output.Bytes()), int64(output.Len()))
+	require.NoError(t, err)
+	require.Len(t, zr.File, 1)
+	rc, err := zr.File[0].Open()
+	require.NoError(t, err)
+	data, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	require.Contains(t, string(data), "![丢失](resource://AbCdEfGhIjKlMnOpQrStUv)")
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// TestKnowledgeDownloadArchiveSeparatesFolderImages: two documents in
+// different folders carrying same-named images must not collide inside one
+// download zip — each gets its own <folder>/images/ subtree.
+func TestKnowledgeDownloadArchiveSeparatesFolderImages(t *testing.T) {
+	var output bytes.Buffer
+	exportA := &types.KnowledgeExportFile{
+		Content: io.NopCloser(strings.NewReader("![同](resource://AaBbCcDdEeFfGgHhIiJjKk)")),
+		Name:    "same.jpg",
+		Images: []types.KnowledgeExportImage{
+			{Ref: "resource://AaBbCcDdEeFfGgHhIiJjKk", Name: "same.jpg", Data: []byte{0xA}},
+		},
+	}
+	exportB := &types.KnowledgeExportFile{
+		Content: io.NopCloser(strings.NewReader("![同](resource://ZzYyXwWvUtSrQpOnMlKjIk)")),
+		Name:    "same.jpg",
+		Images: []types.KnowledgeExportImage{
+			{Ref: "resource://ZzYyXwWvUtSrQpOnMlKjIk", Name: "same.jpg", Data: []byte{0xB}},
+		},
+	}
+	exports := map[string]*types.KnowledgeExportFile{"a": exportA, "b": exportB}
+	err := writeKnowledgeDownloadArchive(context.Background(), &output,
+		[]knowledgeDownloadEntry{
+			{ID: "a", FolderPath: "团队文档"},
+			{ID: "b", FolderPath: "产品手册"},
+		},
+		func(_ context.Context, id string) (*types.KnowledgeExportFile, error) { return exports[id], nil },
+		1<<20)
+	require.NoError(t, err)
+
+	zr, err := zip.NewReader(bytes.NewReader(output.Bytes()), int64(output.Len()))
+	require.NoError(t, err)
+	names := make(map[string]string, len(zr.File))
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		require.NoError(t, err)
+		data, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		require.NoError(t, rc.Close())
+		names[f.Name] = string(data)
+	}
+	require.Equal(t, []string{
+		"产品手册/images/same.jpg", "产品手册/same.jpg",
+		"团队文档/images/same.jpg", "团队文档/same.jpg",
+	}, sortedKeys(names))
+	require.Equal(t, string([]byte{0xA}), names["团队文档/images/same.jpg"])
+	require.Equal(t, string([]byte{0xB}), names["产品手册/images/same.jpg"])
+	require.Contains(t, names["团队文档/same.jpg"], "![同](images/same.jpg)")
+	require.Contains(t, names["产品手册/same.jpg"], "![同](images/same.jpg)")
 }

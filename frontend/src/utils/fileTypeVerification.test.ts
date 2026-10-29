@@ -24,3 +24,13 @@ test('XMind uploads work before engine discovery and respect discovered capabili
     assert.equal(shouldRejectKnowledgeFileType(filename, ['pdf']), true)
   }
 })
+
+test('zip knowledge packages pass every whitelist shape', () => {
+  // Zip is expanded by the upload endpoint, not a parser engine, so it must
+  // be accepted before engines load (fallback whitelist), with an empty
+  // engine set, and alongside a dynamic whitelist that has no zip entry.
+  for (const validTypes of [undefined, [], new Set<string>(), ['pdf', 'md']]) {
+    assert.equal(shouldRejectKnowledgeFileType('docs.zip', validTypes), false)
+    assert.equal(shouldRejectKnowledgeFileType('手册.ZIP', validTypes), false)
+  }
+})

@@ -21,6 +21,7 @@ type createKnowledgeFileRepoStub struct {
 	createCalls      int
 	createErr        error
 	createdKnowledge *types.Knowledge
+	createdAll       []*types.Knowledge
 }
 
 func (r *createKnowledgeFileRepoStub) CheckKnowledgeExists(
@@ -36,6 +37,7 @@ func (r *createKnowledgeFileRepoStub) CreateKnowledge(ctx context.Context, knowl
 	r.createCalls++
 	copied := *knowledge
 	r.createdKnowledge = &copied
+	r.createdAll = append(r.createdAll, &copied)
 	return r.createErr
 }
 

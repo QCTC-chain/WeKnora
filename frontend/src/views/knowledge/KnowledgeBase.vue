@@ -247,7 +247,7 @@ const supportedFileTypes = computed<Set<string>>(() => {
 })
 
 const acceptFileTypes = computed(() =>
-  [...supportedFileTypes.value].map(t => '.' + t).join(',')
+  [...supportedFileTypes.value].map(t => '.' + t).join(',').concat(',.zip')
 )
 
 const unsupportedFileTypes = computed<string[]>(() => {
@@ -1890,6 +1890,21 @@ const executeUrlImport = async (
     window.dispatchEvent(new CustomEvent('knowledgeFileUploaded', {
       detail: { kbId: targetKbId },
     }));
+    // A .zip file URL expands into several documents and responds with an
+    // archive import report instead of a single knowledge payload.
+    const archiveData = responseData?.data;
+    if (archiveData?.type === 'archive') {
+      const items = Array.isArray(archiveData.items) ? archiveData.items : [];
+      const created = items.filter((item: any) => item?.status === 'created').length;
+      const failed = items.filter((item: any) => item?.status === 'failed').length;
+      const skipped = Array.isArray(archiveData.skipped) ? archiveData.skipped.length : 0;
+      if (created > 0) {
+        MessagePlugin.success(t('knowledgeBase.urlArchiveImportResult', { created, failed, skipped }));
+      } else {
+        MessagePlugin.error(t('knowledgeBase.urlArchiveImportFailedAll', { failed }));
+      }
+      return;
+    }
     const isSuccess = responseData?.success || responseData?.code === 200 || responseData?.status === 'success' || (!responseData?.error && responseData);
     if (isSuccess) {
       MessagePlugin.success(t('knowledgeBase.urlImportSuccess'));

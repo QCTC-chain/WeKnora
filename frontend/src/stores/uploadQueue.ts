@@ -161,7 +161,16 @@ export function createUploadQueue(items: UploadItem[], batches: UploadBatch[], d
       if (item.transfer === 'uploading') item.transfer = 'cancelled'
     } else {
       const outcome = classifyUploadResult(result)
-      if (outcome.kind === 'uploaded') {
+      if (outcome.kind === 'archive') {
+        // The zip expanded into one document per Markdown file server-side;
+        // the documents reach the list through the refresh below. No single
+        // knowledge id exists, so there is nothing to poll here.
+        item.transfer = 'uploaded'
+        item.loaded = item.size
+        item.parseStatus = 'completed'
+        item.archive = outcome.summary
+        payloads.delete(item.id)
+      } else if (outcome.kind === 'uploaded') {
         item.transfer = 'uploaded'
         item.loaded = item.size
         item.knowledgeId = outcome.knowledgeId

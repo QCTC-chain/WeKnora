@@ -140,6 +140,45 @@ test('classifyUploadResult reads success, duplicate rejections and failures', ()
   assert.deepEqual(classifyUploadResult(undefined), { kind: 'failed', message: undefined })
 })
 
+test('classifyUploadResult folds an archive report into per-document counts', () => {
+  const report = {
+    type: 'archive',
+    items: [
+      { knowledge_id: 'k1', title: 'a.md', status: 'created', images_stored: 29 },
+      { title: 'b.md', status: 'duplicate' },
+      { title: 'c.md', status: 'failed', error: 'storage full' },
+      { title: 'd.md', status: 'created', warnings: ['压缩包中未找到图片 images/gone.png，保留原路径'] },
+    ],
+    skipped: [{ title: 'e.pdf', status: 'skipped' }],
+  }
+  assert.deepEqual(classifyUploadResult({ success: true, data: report }), {
+    kind: 'archive',
+    summary: {
+      created: 2,
+      duplicates: 1,
+      failed: 1,
+      skipped: 1,
+      warnings: ['d.md: 压缩包中未找到图片 images/gone.png，保留原路径'],
+      totalWarnings: 1,
+    },
+  })
+  // A plain knowledge payload is not mistaken for a report.
+  assert.deepEqual(
+    classifyUploadResult({ success: true, data: { id: 'k1', parse_status: 'pending' } }),
+    { kind: 'uploaded', knowledgeId: 'k1', parseStatus: 'pending' },
+  )
+})
+
+test('an uploaded archive row is ready without parse polling', () => {
+  const row = item({
+    transfer: 'uploaded',
+    parseStatus: 'completed',
+    archive: { created: 3, duplicates: 0, failed: 0, skipped: 0, warnings: [], totalWarnings: 0 },
+  })
+  assert.equal(itemPhase(row), 'ready')
+  assert.equal(needsParsePolling(row), false)
+})
+
 test('estimateRate waits for a one second window and ignores stale samples', () => {
   assert.equal(estimateRate([{ at: 0, bytes: 0 }, { at: 500, bytes: 1000 }]), 0)
   assert.equal(estimateRate([{ at: 0, bytes: 0 }, { at: 2000, bytes: 4000 }]), 2000)

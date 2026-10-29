@@ -2,6 +2,7 @@ package handler
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	stderrors "errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/filetransport"
+	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/gin-gonic/gin"
@@ -127,7 +129,7 @@ func (h *KnowledgeHandler) BatchDownloadKnowledge(c *gin.Context) {
 		_ = os.Remove(archivePath)
 	}()
 	if err := writeKnowledgeDownloadArchive(
-		ctx, archive, entries, h.kgService.GetKnowledgeFile, maxBatchDownloadBytes,
+		ctx, archive, entries, h.kgService.GetKnowledgeFileForExport, maxBatchDownloadBytes,
 	); err != nil {
 		mapped := mapKnowledgeDownloadError(err)
 		if appErr, ok := errors.IsAppError(mapped); !ok || appErr.HTTPCode >= 500 {
@@ -191,7 +193,7 @@ func mapKnowledgeDownloadError(err error) error {
 	return err
 }
 
-type knowledgeDownloadOpener func(context.Context, string) (io.ReadCloser, string, error)
+type knowledgeDownloadOpener func(context.Context, string) (*types.KnowledgeExportFile, error)
 
 func writeKnowledgeDownloadArchive(
 	ctx context.Context,
@@ -207,7 +209,7 @@ func writeKnowledgeDownloadArchive(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		file, filename, err := open(ctx, entry.ID)
+		export, err := open(ctx, entry.ID)
 		if err != nil {
 			if isKnowledgeDownloadCanceled(err) {
 				return err
@@ -216,34 +218,126 @@ func writeKnowledgeDownloadArchive(
 				gin.H{"knowledge_id": entry.ID},
 			)
 		}
-		name := uniqueKnowledgeDownloadZipPath(entry.FolderPath, filename, usedNames)
-		// 原样存储可避免 PDF、Office 等已压缩文件再次压缩的 CPU 开销。
-		zipEntry, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
-		if err != nil {
-			_ = file.Close()
-			return errors.NewInternalServerError("无法写入下载压缩包，请稍后重试")
+		name := uniqueKnowledgeDownloadZipPath(entry.FolderPath, export.Name, usedNames)
+		if len(export.Images) == 0 {
+			total, err = writeKnowledgeDownloadEntry(ctx, writer, name, export.Content, limit-total)
+			if closeErr := export.Content.Close(); err == nil && closeErr != nil {
+				err = errors.NewInternalServerError("部分文件读取失败，未生成压缩包，请稍后重试").WithDetails(
+					gin.H{"knowledge_id": entry.ID},
+				)
+			}
+		} else {
+			total, err = writeKnowledgeDownloadEntryWithImages(
+				ctx, writer, entry.FolderPath, name, export, usedNames, limit-total,
+			)
 		}
-		n, copyErr := io.Copy(zipEntry, io.LimitReader(
-			&knowledgeDownloadReader{ctx: ctx, reader: file}, limit-total+1,
-		))
-		closeErr := file.Close()
-		total += n
+		if err != nil {
+			return err
+		}
 		if total > limit {
 			return errors.NewBadRequestError("所选文件合计超过 512 MiB，请分批下载")
-		}
-		if isKnowledgeDownloadCanceled(copyErr) {
-			return copyErr
-		}
-		if copyErr != nil || closeErr != nil {
-			return errors.NewInternalServerError("部分文件读取失败，未生成压缩包，请稍后重试").WithDetails(
-				gin.H{"knowledge_id": entry.ID},
-			)
 		}
 	}
 	if err := writer.Close(); err != nil {
 		return errors.NewInternalServerError("无法完成下载压缩包，请稍后重试")
 	}
 	return nil
+}
+
+// writeKnowledgeDownloadEntryWithImages writes one document plus the images
+// it references through resource:// handles: the markdown is rewritten to
+// relative images/ paths and each payload is laid out beside it, restoring
+// the archive layout the upload expanded from.
+func writeKnowledgeDownloadEntryWithImages(
+	ctx context.Context,
+	writer *zip.Writer,
+	folderPath, name string,
+	export *types.KnowledgeExportFile,
+	usedNames map[string]bool,
+	remaining int64,
+) (int64, error) {
+	var total int64
+	data, err := io.ReadAll(io.LimitReader(&knowledgeDownloadReader{ctx: ctx, reader: export.Content}, remaining+1))
+	_ = export.Content.Close()
+	if err != nil {
+		if isKnowledgeDownloadCanceled(err) {
+			return 0, err
+		}
+		return 0, errors.NewInternalServerError("部分文件读取失败，未生成压缩包，请稍后重试").WithDetails(
+			gin.H{"knowledge_id": export.Name},
+		)
+	}
+	total += int64(len(data))
+	if total > remaining {
+		return total, errors.NewBadRequestError("所选文件合计超过 512 MiB，请分批下载")
+	}
+
+	// A missing or oversized payload keeps its resource:// reference in the
+	// markdown instead of failing the whole archive.
+	refToZipPath := make(map[string]string, len(export.Images))
+	refToRelPath := make(map[string]string, len(export.Images))
+	for _, image := range export.Images {
+		imageDir := sanitizeDownloadFolderPath(folderPath)
+		if imageDir != "" {
+			imageDir += "/images"
+		} else {
+			imageDir = "images"
+		}
+		zipPath := uniqueKnowledgeDownloadZipPath(imageDir, image.Name, usedNames)
+		refToZipPath[image.Ref] = zipPath
+		// The markdown sits at folderPath/<name>, so its relative image path
+		// is the zip path minus the folder prefix.
+		refToRelPath[image.Ref] = strings.TrimPrefix(zipPath, sanitizeDownloadFolderPath(folderPath)+"/")
+	}
+	rewritten, _ := docparser.RewriteProviderImageRefs(string(data), func(ref string) (string, bool) {
+		p, ok := refToRelPath[ref]
+		return p, ok
+	})
+	total, err = writeKnowledgeDownloadEntry(ctx, writer, name, strings.NewReader(rewritten), remaining-total)
+	if err != nil {
+		return total, err
+	}
+
+	for _, image := range export.Images {
+		zipPath, ok := refToZipPath[image.Ref]
+		if !ok {
+			continue
+		}
+		var written int64
+		written, err = writeKnowledgeDownloadEntry(ctx, writer, zipPath, bytes.NewReader(image.Data), remaining-total)
+		total += written
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// writeKnowledgeDownloadEntry streams one file into the archive and reports
+// the bytes it consumed from the batch budget.
+func writeKnowledgeDownloadEntry(
+	ctx context.Context,
+	writer *zip.Writer,
+	name string,
+	content io.Reader,
+	remaining int64,
+) (int64, error) {
+	// 原样存储可避免 PDF、Office 等已压缩文件再次压缩的 CPU 开销。
+	zipEntry, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
+	if err != nil {
+		return 0, errors.NewInternalServerError("无法写入下载压缩包，请稍后重试")
+	}
+	n, copyErr := io.Copy(zipEntry, io.LimitReader(&knowledgeDownloadReader{ctx: ctx, reader: content}, remaining+1))
+	if n > remaining {
+		return n, errors.NewBadRequestError("所选文件合计超过 512 MiB，请分批下载")
+	}
+	if isKnowledgeDownloadCanceled(copyErr) {
+		return n, copyErr
+	}
+	if copyErr != nil {
+		return n, errors.NewInternalServerError("部分文件读取失败，未生成压缩包，请稍后重试")
+	}
+	return n, nil
 }
 
 // 每次读取前检查取消信号，用户离开页面后停止继续打包。

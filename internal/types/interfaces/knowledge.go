@@ -29,6 +29,20 @@ type KnowledgeService interface {
 		channel string,
 		processOverrides *types.KnowledgeProcessOverrides,
 	) (*types.Knowledge, error)
+	// CreateKnowledgeFromArchive expands an uploaded .zip knowledge package —
+	// Markdown documents plus their images — into one knowledge entry per
+	// document, rewriting relative image references to stored URLs. It
+	// returns a per-document report instead of a single knowledge.
+	CreateKnowledgeFromArchive(
+		ctx context.Context,
+		kbID string,
+		file *multipart.FileHeader,
+		metadata map[string]any,
+		enableMultimodel *bool,
+		tagIDs []string,
+		channel string,
+		processOverrides *types.KnowledgeProcessOverrides,
+	) (*types.ArchiveImportReport, error)
 	// CreateKnowledgeFromURL creates knowledge from a URL.
 	// When fileName or fileType is provided (or the URL path has a known file extension),
 	// the URL is treated as a direct file download instead of a web page crawl.
@@ -45,6 +59,22 @@ type KnowledgeService interface {
 		channel string,
 		processOverrides *types.KnowledgeProcessOverrides,
 	) (*types.Knowledge, error)
+	// CreateKnowledgeFromURLWithReport is CreateKnowledgeFromURL with archive
+	// expansion: a .zip file URL is expanded and imported per document, and
+	// the caller receives the archive report (knowledge is nil) instead of a
+	// single knowledge record.
+	CreateKnowledgeFromURLWithReport(
+		ctx context.Context,
+		kbID string,
+		url string,
+		fileName string,
+		fileType string,
+		enableMultimodel *bool,
+		title string,
+		tagIDs []string,
+		channel string,
+		processOverrides *types.KnowledgeProcessOverrides,
+	) (*types.Knowledge, *types.ArchiveImportReport, error)
 	// CreateKnowledgeFromPassage creates knowledge from text passages.
 	// channel identifies the ingestion channel; empty defaults to "web".
 	CreateKnowledgeFromPassage(ctx context.Context, kbID string, passage []string, channel string) (*types.Knowledge, error)
@@ -111,6 +141,10 @@ type KnowledgeService interface {
 	DeleteKnowledgeList(ctx context.Context, ids []string) error
 	// GetKnowledgeFile retrieves the file associated with the knowledge.
 	GetKnowledgeFile(ctx context.Context, id string) (io.ReadCloser, string, error)
+	// GetKnowledgeFileForExport retrieves the original file plus any
+	// content-bound images referenced through resource:// handles, so a
+	// download archive can restore an images/ directory beside the document.
+	GetKnowledgeFileForExport(ctx context.Context, id string) (*types.KnowledgeExportFile, error)
 	// UpdateKnowledge updates knowledge information.
 	UpdateKnowledge(ctx context.Context, knowledge *types.Knowledge) error
 	// RegenerateKnowledgeSummary refreshes the document description and summary retrieval chunk.
