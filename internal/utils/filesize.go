@@ -89,3 +89,18 @@ func GetMaxArchiveSize() int64 {
 func GetMaxArchiveSizeMB() int64 {
 	return envSizeMB("ARCHIVE_MAX_SIZE_MB", defaultMaxArchiveSizeMB)
 }
+
+// GetMaxArchiveEntries returns how many regular files one .zip knowledge
+// archive may contain. Skipped entries (system metadata like __MACOSX,
+// links, duplicates) do not count. ARCHIVE_MAX_ENTRIES defaults to 5000 and
+// is a deploy-time knob for packages with unusually many assets.
+func GetMaxArchiveEntries() int {
+	if entriesStr := os.Getenv("ARCHIVE_MAX_ENTRIES"); entriesStr != "" {
+		if entries, err := strconv.Atoi(entriesStr); err == nil && entries > 0 {
+			return entries
+		}
+	}
+	return defaultMaxArchiveEntries
+}
+
+const defaultMaxArchiveEntries = 5000

@@ -25,7 +25,8 @@
 
 | 项 | 限制 | 来源 |
 | --- | --- | --- |
-| zip 体积 | 200 MB | `ARCHIVE_MAX_SIZE_MB` |
+| zip 体积 | 200 MB | `ARCHIVE_MAX_SIZE_MB`（nginx `client_max_body_size` 需同步） |
+| 常规文件数 | 5000（仅计入实际加载的文件；`__MACOSX`、链接、重复等被跳过的条目不占额度） | `ARCHIVE_MAX_ENTRIES` |
 | 展开总量 | 512 MiB | `archive.Limits` |
 | 条目数 / 单条目 | 5000 / 100 MiB | `archive.Limits` |
 | md 数量 / 单篇图片数 | 200 / 1000（超出保留原路径+警告） | manifest / `maxArchiveDocumentImages` |

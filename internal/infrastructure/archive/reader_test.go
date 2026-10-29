@@ -189,3 +189,46 @@ func TestOpen_RejectsNonZip(t *testing.T) {
 		t.Fatalf("err = %v, want ErrBadArchive", err)
 	}
 }
+
+// TestOpen_SkippedEntriesDoNotConsumeEntryBudget: system metadata, unsafe
+// paths, links and duplicates are skipped without counting against
+// MaxEntries — only actually loaded files consume the budget.
+func TestOpen_SkippedEntriesDoNotConsumeEntryBudget(t *testing.T) {
+	files := map[string][]byte{
+		"doc.md":           []byte("# ok"),
+		"__MACOSX/doc.md":  []byte("junk"),
+		".DS_Store":        []byte("junk"),
+		"Thumbs.db":        []byte("junk"),
+		"._resource":       []byte("junk"),
+		"img/._a.png":      []byte("junk"),
+		"../escape.md":     []byte("unsafe"),
+		"__MACOSX/extra/x": []byte("junk"),
+		"a.md":             []byte("a"),
+		"b.md":             []byte("b"),
+	}
+	// Budget of 3 must be filled by exactly the three real files; the seven
+	// skipped entries must not trip ErrTooManyFiles.
+	a := openArchive(t, writeZip(t, files, nil), Limits{MaxDocuments: 10, MaxEntries: 3, MaxExpandedBytes: 1 << 20, MaxSingleEntryBytes: 1 << 20})
+	names := a.Names()
+	if len(names) != 3 {
+		t.Fatalf("loaded = %v, want the 3 real files", names)
+	}
+	if len(a.Skipped()) < 5 {
+		t.Fatalf("skipped = %v, want the junk entries recorded", a.Skipped())
+	}
+}
+
+// TestDefaultLimits_ArchiveEntriesFromEnv pins the ARCHIVE_MAX_ENTRIES knob.
+func TestDefaultLimits_ArchiveEntriesFromEnv(t *testing.T) {
+	if got := DefaultLimits().MaxEntries; got != 5000 {
+		t.Fatalf("default MaxEntries = %d, want 5000", got)
+	}
+	t.Setenv("ARCHIVE_MAX_ENTRIES", "20000")
+	if got := DefaultLimits().MaxEntries; got != 20000 {
+		t.Fatalf("MaxEntries with env = %d, want 20000", got)
+	}
+	t.Setenv("ARCHIVE_MAX_ENTRIES", "not-a-number")
+	if got := DefaultLimits().MaxEntries; got != 5000 {
+		t.Fatalf("MaxEntries with invalid env = %d, want 5000", got)
+	}
+}

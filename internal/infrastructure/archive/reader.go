@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Tencent/WeKnora/internal/utils"
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
@@ -40,7 +41,7 @@ type Limits struct {
 func DefaultLimits() Limits {
 	return Limits{
 		MaxDocuments:        200,
-		MaxEntries:          5000,
+		MaxEntries:          utils.GetMaxArchiveEntries(),
 		MaxExpandedBytes:    512 << 20, // 512 MiB, same ceiling as batch download
 		MaxSingleEntryBytes: 100 << 20, // 100 MiB, matches the document-wide inline image budget
 	}
@@ -86,15 +87,13 @@ func Open(r io.ReaderAt, size int64, limits Limits) (*Archive, error) {
 	}
 	a := &Archive{reader: reader, files: make(map[string]*zip.File, len(reader.File)), limits: limits}
 
-	fileCount := 0
+	// Only entries that are actually loaded count against MaxEntries;
+	// directories, junk metadata, links and duplicates are skipped without
+	// consuming the budget.
 	for _, f := range reader.File {
 		mode := f.Mode()
 		if mode.IsDir() {
 			continue
-		}
-		fileCount++
-		if fileCount > limits.MaxEntries {
-			return nil, ErrTooManyFiles
 		}
 		name, err := normalizeEntryName(f.Name, f.NonUTF8)
 		if err != nil {
@@ -112,6 +111,9 @@ func Open(r io.ReaderAt, size int64, limits Limits) (*Archive, error) {
 		if _, dup := a.files[name]; dup {
 			a.skipped = append(a.skipped, SkippedEntry{Name: name, Reason: "重复路径，保留首个"})
 			continue
+		}
+		if len(a.files) >= limits.MaxEntries {
+			return nil, ErrTooManyFiles
 		}
 		a.files[name] = f
 		a.names = append(a.names, name)
