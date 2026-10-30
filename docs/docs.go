@@ -22974,6 +22974,70 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/chat/completions": {
+            "post": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "OpenAI 兼容端点:把一次 chat/completions 请求作为单轮提问发给\n指定的已发布智能体。messages 数组整体折叠为一轮 query(调用方指令 +\n对话历史 + 本次问题),每次调用创建 Kind=gateway 的临时会话,\n跑完留在库中供审计(默认 72h 后由回收任务清理)。M1 不执行客户端\ntools;temperature 等采样参数以智能体配置为准。\nstream=true 走 SSE(chat.completion.chunk + [DONE]),\n首个内容前每 15s 输出 keep-alive 注释行;stream=false 聚合返回。\n每 key 并发默认上限 3,超限立即 429(concurrency_limit)。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "模型网关"
+                ],
+                "summary": "网关对话补全",
+                "parameters": [
+                    {
+                        "description": "对话补全请求",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ChatCompletionRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "补全结果(非流式)",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ChatCompletionResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "请求不合法",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "model 不存在或未发布",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "每 key 并发超限",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ErrorEnvelope"
+                        }
+                    },
+                    "500": {
+                        "description": "智能体运行失败",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/models": {
             "get": {
                 "security": [
@@ -26446,7 +26510,8 @@ const docTemplate = `{
                 "wiki.content_changed",
                 "faq.import_started",
                 "faq.import_completed",
-                "faq.import_failed"
+                "faq.import_failed",
+                "gateway.completion"
             ],
             "x-enum-varnames": [
                 "AuditActionMemberAdded",
@@ -26510,7 +26575,8 @@ const docTemplate = `{
                 "AuditActionWikiContentChanged",
                 "AuditActionFAQImportStarted",
                 "AuditActionFAQImportCompleted",
-                "AuditActionFAQImportFailed"
+                "AuditActionFAQImportFailed",
+                "AuditActionGatewayCompletion"
             ]
         },
         "github_com_Tencent_WeKnora_internal_types.AuditLog": {
@@ -42619,6 +42685,237 @@ const docTemplate = `{
                 }
             }
         },
+        "internal_handler_openai_compat.ChatCompletionChoice": {
+            "type": "object",
+            "properties": {
+                "finish_reason": {
+                    "description": "\"stop\" in M1",
+                    "type": "string"
+                },
+                "index": {
+                    "type": "integer"
+                },
+                "message": {
+                    "$ref": "#/definitions/internal_handler_openai_compat.RespMessage"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ChatCompletionRequest": {
+            "type": "object",
+            "properties": {
+                "messages": {
+                    "description": "Messages is the conversation so far; rendered into a single gateway\nturn (docs/design/agent-model-gateway-m1.md §7.2).",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_handler_openai_compat.ChatMessage"
+                    }
+                },
+                "model": {
+                    "description": "Model is the published agent: its UUID, or its name (unique among the\nworkspace's published agents).",
+                    "type": "string"
+                },
+                "stream": {
+                    "description": "Stream selects SSE chunking; false aggregates the full answer.",
+                    "type": "boolean"
+                },
+                "stream_options": {
+                    "description": "StreamOptions is accepted for wire compatibility; only include_usage\nmatters and usage is always included.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/internal_handler_openai_compat.StreamOptions"
+                        }
+                    ]
+                },
+                "tool_choice": {
+                    "type": "object"
+                },
+                "tools": {
+                    "description": "Tools and ToolChoice are accepted for wire compatibility and ignored:\nM1 never executes client tools (docs §14). The count is echoed in the\nresponse meta as client_tools_ignored.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_handler_openai_compat.ClientToolDefinition"
+                    }
+                },
+                "user": {
+                    "description": "User is an opaque caller identifier, forwarded to audit logs only.",
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ChatCompletionResponse": {
+            "type": "object",
+            "properties": {
+                "choices": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_handler_openai_compat.ChatCompletionChoice"
+                    }
+                },
+                "created": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "meta": {
+                    "description": "Meta carries non-standard WeKnora extensions (warnings, ignored\nparams, tool-ignored count). OpenAI clients ignore unknown fields.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/internal_handler_openai_compat.CompletionMeta"
+                        }
+                    ]
+                },
+                "model": {
+                    "description": "the caller's model string, echoed",
+                    "type": "string"
+                },
+                "object": {
+                    "description": "\"chat.completion\"",
+                    "type": "string"
+                },
+                "usage": {
+                    "$ref": "#/definitions/internal_handler_openai_compat.Usage"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ChatMessage": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "$ref": "#/definitions/internal_handler_openai_compat.ContentUnion"
+                },
+                "name": {
+                    "description": "Name is the legacy participant name; kept in the history transcript.",
+                    "type": "string"
+                },
+                "role": {
+                    "description": "system / developer / user / assistant / tool",
+                    "type": "string"
+                },
+                "tool_call_id": {
+                    "description": "ToolCallID ties a tool result to a prior tool call (rendered as text).",
+                    "type": "string"
+                },
+                "tool_calls": {
+                    "description": "ToolCalls on assistant messages are recorded textually in the history\ntranscript; the gateway never executes client tools.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_handler_openai_compat.ClientToolCall"
+                    }
+                }
+            }
+        },
+        "internal_handler_openai_compat.ClientToolCall": {
+            "type": "object",
+            "properties": {
+                "function": {
+                    "$ref": "#/definitions/internal_handler_openai_compat.ClientToolFnCall"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ClientToolDefinition": {
+            "type": "object",
+            "properties": {
+                "function": {
+                    "$ref": "#/definitions/internal_handler_openai_compat.ClientToolFnSpec"
+                },
+                "type": {
+                    "description": "\"function\"",
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ClientToolFnCall": {
+            "type": "object",
+            "properties": {
+                "arguments": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ClientToolFnSpec": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "parameters": {
+                    "type": "object"
+                }
+            }
+        },
+        "internal_handler_openai_compat.CompletionMeta": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "description": "AgentID is the resolved agent UUID.",
+                    "type": "string"
+                },
+                "client_tools_ignored": {
+                    "description": "ClientToolsIgnored counts received-but-not-executed client tools.",
+                    "type": "integer"
+                },
+                "ignored_params": {
+                    "description": "IgnoredParams echoes the sampling params the gateway dropped.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "session_id": {
+                    "description": "SessionID is the temporary gateway session; findable in the web UI.",
+                    "type": "string"
+                },
+                "warnings": {
+                    "description": "Warnings reports renderer adjustments (dropped images, timeouts).",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "internal_handler_openai_compat.ContentPart": {
+            "type": "object",
+            "properties": {
+                "image_url": {
+                    "$ref": "#/definitions/internal_handler_openai_compat.ImageURLPo"
+                },
+                "text": {
+                    "type": "string"
+                },
+                "type": {
+                    "description": "\"text\" | \"image_url\"",
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ContentUnion": {
+            "type": "object",
+            "properties": {
+                "parts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_handler_openai_compat.ContentPart"
+                    }
+                },
+                "text": {
+                    "type": "string"
+                }
+            }
+        },
         "internal_handler_openai_compat.ErrorBody": {
             "type": "object",
             "properties": {
@@ -42641,6 +42938,17 @@ const docTemplate = `{
             "properties": {
                 "error": {
                     "$ref": "#/definitions/internal_handler_openai_compat.ErrorBody"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ImageURLPo": {
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
                 }
             }
         },
@@ -42706,6 +43014,40 @@ const docTemplate = `{
                 "is_builtin": {
                     "description": "IsBuiltin marks workspace built-in agents.",
                     "type": "boolean"
+                }
+            }
+        },
+        "internal_handler_openai_compat.RespMessage": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string"
+                },
+                "role": {
+                    "description": "\"assistant\"",
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handler_openai_compat.StreamOptions": {
+            "type": "object",
+            "properties": {
+                "include_usage": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "internal_handler_openai_compat.Usage": {
+            "type": "object",
+            "properties": {
+                "completion_tokens": {
+                    "type": "integer"
+                },
+                "prompt_tokens": {
+                    "type": "integer"
+                },
+                "total_tokens": {
+                    "type": "integer"
                 }
             }
         },

@@ -620,3 +620,38 @@ func (r *sessionRepository) ListStaleForkSnapshotLeases(
 	}
 	return leases, nil
 }
+
+// ListExpiredGatewaySessions returns gateway-kind sessions (kind="gateway",
+// the OpenAI-compatible gateway's one-shot audit sessions) whose last update
+// is older than olderThan, oldest first, capped at limit rows per pass. The
+// gateway session reaper is the only caller (docs design §7.1).
+func (r *sessionRepository) ListExpiredGatewaySessions(
+	ctx context.Context, olderThan time.Time, limit int,
+) ([]*types.Session, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var sessions []*types.Session
+	if err := r.db.WithContext(ctx).
+		Where("kind = ?", types.SessionKindGateway).
+		Where("updated_at < ?", olderThan).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&sessions).Error; err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
+// DeleteGatewaySessionsByID soft-deletes gateway sessions by ID regardless of
+// tenant (the reaper has no user context; the IDs come straight from
+// ListExpiredGatewaySessions, so no scope escape is possible).
+func (r *sessionRepository) DeleteGatewaySessionsByID(ctx context.Context, ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := r.db.WithContext(ctx).
+		Where("kind = ? AND id IN ?", types.SessionKindGateway, ids).
+		Delete(&types.Session{})
+	return res.RowsAffected, res.Error
+}

@@ -140,4 +140,14 @@ type SessionRepository interface {
 	DeleteForkSnapshotLease(ctx context.Context, snapshotID string) error
 	// ListStaleForkSnapshotLeases returns leases older than olderThan.
 	ListStaleForkSnapshotLeases(ctx context.Context, olderThan time.Time) ([]*types.ForkSnapshotLease, error)
+	// ListExpiredGatewaySessions returns gateway-kind sessions (OpenAI
+	// compatible gateway audit sessions, kind="gateway") whose last update
+	// is older than olderThan, up to limit rows. The gateway session reaper
+	// deletes them after gateway.session_retention (docs §7.1).
+	ListExpiredGatewaySessions(ctx context.Context, olderThan time.Time, limit int) ([]*types.Session, error)
+	// DeleteGatewaySessionsByID soft-deletes gateway sessions by ID across
+	// all tenants. The reaper is the only caller and has no user context,
+	// so unlike Delete/BatchDelete this bypasses the per-user scope — it
+	// matches on kind=gateway in the reaper's listing, never raw user IDs.
+	DeleteGatewaySessionsByID(ctx context.Context, ids []string) (int64, error)
 }

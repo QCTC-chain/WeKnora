@@ -363,6 +363,7 @@ rerank 模型加载失败或调用出错时，请求不会失败，而是按召�
 | 基础设施与数据源 | [02-api-infra.md](./02-api-infra.md) | `/vector-stores`、`/storage-backends`、`/web-search-providers`、`/datasource` |
 | Agent 与 MCP | [02-api-agent-mcp.md](./02-api-agent-mcp.md) | `/agents`、`/mcp-services`、`/agent`、`/user/favorites` |
 | 内置 MCP Server | [MCP 集成](../03-features/08-mcp.md) | `/mcp-endpoints`、`/mcp/:endpoint_id` |
+| 模型网关(OpenAI 兼容) | [模型网关](03-gateway-openai-compat.md) | `/v1/models`、`/v1/chat/completions` |
 | 本机浏览器 | [本机浏览器](../05-clients/09-local-browser.md) | `/me/browser`、`/local-browser` |
 | 沙箱、技能与个人变量 | [02-api-sandbox-skills.md](./02-api-sandbox-skills.md) | `/sandbox-configs`、`/skills`、`/me/env-vars` |
 | 长期记忆 | [02-api-memory.md](./02-api-memory.md) | `/memory`、`/tenants/kv/memory-config` |

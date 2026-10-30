@@ -1,6 +1,6 @@
 # 智能体模型网关(Agent-as-Model)M1:OpenAI 兼容端点
 
-状态:草案　关联:`docs/design/agent-hitl-suspend-resume.md`(M3 依赖)、`docs/design/agent-permission-model.md`、`internal/router/routes_mcp_endpoint.go`(公开集成面先例)
+状态:已实现(M1 全部里程碑 G1–G5 已落地)　关联:`docs/design/agent-hitl-suspend-resume.md`(M3 依赖)、`docs/design/agent-permission-model.md`、`internal/router/routes_mcp_endpoint.go`(公开集成面先例)
 
 ## 0. 摘要
 
@@ -293,13 +293,30 @@ assistant: …
 
 ## 13. 里程碑拆解
 
-| 步骤 | 内容 | 预估 |
-|---|---|---|
-| G1 | 协议类型 + 鉴权中间件 + `/v1/models`(含 published 字段与迁移) | 2d |
-| G2 | 渲染器 + 临时会话构造 + `SessionService.AgentQA` 接通(非流式先通) | 3d |
-| G3 | 翻译器 + SSE 流式 + 心跳/超时/断连 | 3d |
-| G4 | 并发/频控、审计、会话回收任务、配置段 | 2d |
-| G5 | 测试(单测/集成/兼容矩阵)+ swagger + 文档 | 3d |
+| 步骤 | 内容 | 预估 | 状态 |
+|---|---|---|---|
+| G1 | 协议类型 + 鉴权中间件 + `/v1/models`(含 published 字段与迁移) | 2d | ✅ |
+| G2 | 渲染器 + 临时会话构造 + `SessionService.AgentQA` 接通(非流式先通) | 3d | ✅ |
+| G3 | 翻译器 + SSE 流式 + 心跳/超时/断连 | 3d | ✅ |
+| G4 | 并发/频控、审计、会话回收任务、配置段 | 2d | ✅ |
+| G5 | 测试(单测/集成/兼容矩阵)+ swagger + 文档 | 3d | ✅(人工兼容矩阵冒烟待部署环境执行,见 §12.3) |
+
+### 13.1 实现落点(G3–G5)
+
+| 交付物 | 位置 |
+|---|---|
+| SSE 翻译器(事件→chunk、思考/进度折叠、同名工具合并一行、断连/超时语义) | `internal/handler/openai_compat/stream.go` |
+| 聚合路径与非流式共享的消息构造/AgentQA 启动器 | `internal/handler/openai_compat/completions.go`(`createTurnMessages`/`launchAgentQA`) |
+| 每 key 并发闸(进程内信号量,超限即 429 `concurrency_limit`) | `internal/handler/openai_compat/concurrency.go` |
+| 每回合审计(`gateway.completion`,凭据指纹不入原文,`audit_payload` 选择性留存 query) | `internal/handler/openai_compat/audit.go`、`internal/types/audit_log.go` |
+| 网关临时会话回收任务(默认 72h,小时级 ticker) | `internal/application/service/gateway_session_reaper.go`、`internal/container/container.go`(`startGatewaySessionReaper`) |
+| 配置段(`heartbeat_interval`/`max_concurrency_per_key`/`session_retention`/`thought_mode`/`progress_mode`/`audit_payload`/`cancel_on_disconnect`/`path_prefix` + `GATEWAY_*` 环境变量) | `internal/config/config.go` |
+| 流式/审计/并发/回收测试(共 30+ 用例) | `internal/handler/openai_compat/stream_test.go`、`internal/application/service/gateway_session_reaper_test.go` |
+
+与设计的两点实现取舍:
+
+1. **同名工具合并(§8)**:SSE 无法改写已发出的帧,实现为 `tool_call` 先挂起、`tool_result` 落地时合成单行 `[工具] name → 结果摘要`(失败则为 `失败: 原因`);若新工具的 call 插队,先补发上一个的 `调用中` 行。长任务期间客户端靠 keep-alive 注释行确认存活。
+2. **断连后残留事件**:客户端断开(cancel_on_disconnect=true)后翻译立即停止,已翻译内容照常落库;取消后仍在途的少量事件不保证捕获(与取消传播固有竞态),审计以落库内容为准。
 
 ## 14. M1 已知限制(需写入用户文档)
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/config"
@@ -60,7 +61,7 @@ func newGatewayTestRouter(t *testing.T, key *types.TenantAPIKey) *gin.Engine {
 		ID: "agt-1", Name: "Doc QA", TenantID: 42, Published: true,
 	}}}
 	r := gin.New()
-	RegisterOpenAICompatRoutes(r, openai_compat.NewGatewayHandler(agents), fakes, fakes, fakes)
+	RegisterOpenAICompatRoutes(r, openai_compat.NewGatewayHandler(agents, nil, nil, nil, nil), fakes, fakes, fakes)
 	return r
 }
 
@@ -116,6 +117,26 @@ func TestGatewayRouteMountsExactlyAtV1(t *testing.T) {
 		r.ServeHTTP(rec, req)
 		require.NotEqual(t, http.StatusOK, rec.Code, "path %s must not be served by the gateway", path)
 	}
+}
+
+func TestGatewayChatCompletionsRouteMounted(t *testing.T) {
+	// The POST route must exist behind the same GatewayAuth (401 without a
+	// key — not gin's 404 for an unregistered route).
+	r := newGatewayTestRouter(t, gatewayChatKey())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	authed := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	authed.Header.Set("Authorization", "Bearer wk-secret")
+	authed.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, authed)
+	// nil SessionService would panic on a real run; a 400 from body
+	// validation proves the route is mounted and reached the handler.
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }
 
 func TestGatewayConfigDisabledByDefault(t *testing.T) {

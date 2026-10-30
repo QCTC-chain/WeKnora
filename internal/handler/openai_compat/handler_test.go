@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/gin-gonic/gin"
@@ -42,6 +43,17 @@ func publishedAgent(id, name string, published bool) *types.CustomAgent {
 	}
 }
 
+// testGatewayCfg, when set, is handed to NewGatewayHandler by newTestHandler.
+// Streaming/concurrency tests swap it to exercise config knobs; the gateway
+// tests run sequentially, so plain assignment is a safe swap protocol.
+var testGatewayCfg *config.Config
+
+// newTestHandler builds a GatewayHandler with optional gateway-side fakes;
+// nil sessions/messages keep list/resolve tests free of QA plumbing.
+func newTestHandler(svc *fakeAgentService, sessions interfaces.SessionService, messages interfaces.MessageService) *GatewayHandler {
+	return NewGatewayHandler(svc, sessions, messages, nil, testGatewayCfg)
+}
+
 // serveModels mounts ListModels behind nothing (auth is the middleware's
 // job) but injects the tenant context GatewayAuth would provide.
 func serveModels(t *testing.T, svc *fakeAgentService) *httptest.ResponseRecorder {
@@ -52,7 +64,7 @@ func serveModels(t *testing.T, svc *fakeAgentService) *httptest.ResponseRecorder
 		c.Request = c.Request.WithContext(
 			context.WithValue(c.Request.Context(), types.TenantIDContextKey, uint64(42)))
 		c.Next()
-	}, NewGatewayHandler(svc).ListModels)
+	}, newTestHandler(svc, nil, nil).ListModels)
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -102,7 +114,7 @@ func TestResolveAgent(t *testing.T) {
 		publishedAgent("agt-2", "Hidden", false),
 		publishedAgent("agt-3", "Wiki Bot", true),
 	}}
-	h := NewGatewayHandler(svc)
+	h := newTestHandler(svc, nil, nil)
 
 	// UUID match wins and requires published state.
 	agent, ok := h.resolveAgent(context.Background(), 42, "agt-1")
@@ -131,7 +143,7 @@ func TestResolveAgent(t *testing.T) {
 		publishedAgent("agt-1", "Doc QA", true),
 		publishedAgent("agt-9", "doc qa", true),
 	}}
-	_, ok = NewGatewayHandler(ambiguous).resolveAgent(context.Background(), 42, "doc qa")
+	_, ok = newTestHandler(ambiguous, nil, nil).resolveAgent(context.Background(), 42, "doc qa")
 	assert.False(t, ok, "duplicate published names must not resolve")
 }
 

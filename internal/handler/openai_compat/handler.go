@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -15,14 +16,36 @@ import (
 // middleware.GatewayAuth, so by the time a handler runs the request has a
 // tenant-scoped API-key session attached.
 type GatewayHandler struct {
-	agents interfaces.CustomAgentService
+	agents   interfaces.CustomAgentService
+	sessions interfaces.SessionService
+	messages interfaces.MessageService
+	// audit receives one row per executed gateway turn (docs §6); nil in
+	// tests degrades audit to a log line, never to a failed request.
+	audit interfaces.AuditLogService
+	// gateway carries the gateway config section (timeouts, streaming
+	// modes, concurrency, audit payload); nil falls back to the defaults.
+	gateway *config.GatewayConfig
+	// concurrency enforces gateway.max_concurrency_per_key (docs §9);
+	// process-local by design (docs/concurrency.go).
+	concurrency *perKeyConcurrency
 }
 
-// NewGatewayHandler wires the gateway handler. agents is the same agent
-// service the workspace UI uses — the gateway deliberately sees agents with
-// tenant isolation and zero extra authority.
-func NewGatewayHandler(agents interfaces.CustomAgentService) *GatewayHandler {
-	return &GatewayHandler{agents: agents}
+// NewGatewayHandler wires the gateway handler. agents/sessions/messages are
+// the same services the workspace UI uses — the gateway deliberately sees
+// agents with tenant isolation and zero extra authority. cfg carries the
+// gateway section; nil falls back to the defaults.
+func NewGatewayHandler(
+	agents interfaces.CustomAgentService,
+	sessions interfaces.SessionService,
+	messages interfaces.MessageService,
+	audit interfaces.AuditLogService,
+	cfg *config.Config,
+) *GatewayHandler {
+	h := &GatewayHandler{agents: agents, sessions: sessions, messages: messages, audit: audit, concurrency: newPerKeyConcurrency()}
+	if cfg != nil {
+		h.gateway = cfg.Gateway
+	}
+	return h
 }
 
 // ListModels godoc

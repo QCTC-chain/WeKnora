@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestApplyGatewayEnvOverrides pins the env-vs-YAML contract for
 // GATEWAY_ENABLED: the OpenAI-compatible model gateway is opt-in, and the
@@ -45,5 +48,35 @@ func TestApplyGatewayEnvOverridesCreatesSection(t *testing.T) {
 	applyGatewayEnvOverrides(cfg)
 	if cfg.Gateway == nil || !cfg.Gateway.Enabled {
 		t.Fatalf("gateway section = %+v, want enabled", cfg.Gateway)
+	}
+}
+
+// TestGatewayRequestTimeoutOverride covers GATEWAY_REQUEST_TIMEOUT: Go
+// durations, bare seconds, and garbage falling back to the default.
+func TestGatewayRequestTimeoutOverride(t *testing.T) {
+	cases := []struct {
+		env  string
+		want time.Duration
+	}{
+		{"90s", 90 * time.Second},
+		{"10m", 10 * time.Minute},
+		{"120", 120 * time.Second},
+		{"", 600 * time.Second},
+		{"garbage", 600 * time.Second},
+		{"-5s", 600 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run("env="+tc.env, func(t *testing.T) {
+			t.Setenv("GATEWAY_REQUEST_TIMEOUT", tc.env)
+			cfg := &Config{Gateway: &GatewayConfig{}}
+			applyGatewayEnvOverrides(cfg)
+			if got := cfg.Gateway.EffectiveRequestTimeout(); got != tc.want {
+				t.Fatalf("request timeout = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// Nil section falls back to the default.
+	if got := (*GatewayConfig)(nil).EffectiveRequestTimeout(); got != 600*time.Second {
+		t.Fatalf("nil-section timeout = %v, want 600s", got)
 	}
 }

@@ -76,6 +76,141 @@ type GatewayConfig struct {
 	// opt-in until an operator decides to expose agents externally.
 	// Env override: GATEWAY_ENABLED=true|false.
 	Enabled bool `yaml:"enabled" json:"enabled"`
+	// RequestTimeout bounds one chat/completions turn (docs §9). Default
+	// 600s. Env override: GATEWAY_REQUEST_TIMEOUT (Go duration or seconds).
+	RequestTimeout time.Duration `yaml:"request_timeout" json:"request_timeout"`
+	// HeartbeatInterval is the SSE keep-alive cadence before the first
+	// content chunk (docs §9). Default 15s. Env override:
+	// GATEWAY_HEARTBEAT_INTERVAL (Go duration or seconds).
+	HeartbeatInterval time.Duration `yaml:"heartbeat_interval" json:"heartbeat_interval"`
+	// MaxConcurrencyPerKey caps simultaneous gateway turns per API key
+	// (docs §9). Over-limit requests answer 429 concurrency_limit
+	// immediately. Default 3. Env override:
+	// GATEWAY_MAX_CONCURRENCY_PER_KEY.
+	MaxConcurrencyPerKey int `yaml:"max_concurrency_per_key" json:"max_concurrency_per_key"`
+	// SessionRetention is how long Kind=gateway sessions are kept for audit
+	// before the reaper deletes them (docs §7.1). Default 72h. Env
+	// override: GATEWAY_SESSION_RETENTION (Go duration or seconds).
+	SessionRetention time.Duration `yaml:"session_retention" json:"session_retention"`
+	// ThoughtMode maps agent thinking to the SSE stream (docs §8):
+	// "reasoning" (default) streams delta.reasoning_content, "collapse"
+	// folds thoughts into content wrapped in <think></think>, "drop"
+	// discards them. Env override: GATEWAY_THOUGHT_MODE.
+	ThoughtMode string `yaml:"thought_mode" json:"thought_mode"`
+	// ProgressMode maps tool/progress events (docs §8): "text" (default)
+	// streams one-line status text, "drop" discards. Env override:
+	// GATEWAY_PROGRESS_MODE.
+	ProgressMode string `yaml:"progress_mode" json:"progress_mode"`
+	// AuditPayload opt-in stores the rendered query (truncated) in the
+	// audit row details. Default false: request bodies may carry external
+	// code context and are not persisted (docs §6). Env override:
+	// GATEWAY_AUDIT_PAYLOAD.
+	AuditPayload bool `yaml:"audit_payload" json:"audit_payload"`
+	// CancelOnDisconnect controls client-disconnect behaviour (docs §8):
+	// true (default) cancels the internal run; false lets it finish so
+	// already-spent tokens are not wasted. Env override:
+	// GATEWAY_CANCEL_ON_DISCONNECT.
+	CancelOnDisconnect *bool `yaml:"cancel_on_disconnect" json:"cancel_on_disconnect"`
+	// PathPrefix is the mount point of the gateway surface. Default "/v1".
+	// Env override: GATEWAY_PATH_PREFIX.
+	PathPrefix string `yaml:"path_prefix" json:"path_prefix"`
+}
+
+// Gateway defaults (docs design/agent-model-gateway-m1.md §9/§10).
+const (
+	DefaultGatewayRequestTimeout     = 600 * time.Second
+	DefaultGatewayHeartbeatInterval  = 15 * time.Second
+	DefaultGatewayMaxConcurrency     = 3
+	DefaultGatewaySessionRetention   = 72 * time.Hour
+	DefaultGatewayThoughtMode        = "reasoning"
+	DefaultGatewayProgressMode       = "text"
+	DefaultGatewayPathPrefix         = "/v1"
+	GatewayThoughtModeReasoning      = "reasoning"
+	GatewayThoughtModeCollapse       = "collapse"
+	GatewayThoughtModeDrop           = "drop"
+	GatewayProgressModeText          = "text"
+	GatewayProgressModeDrop          = "drop"
+)
+
+// EffectiveRequestTimeout returns the configured turn timeout, nil-safe,
+// with the design default for unset values.
+func (g *GatewayConfig) EffectiveRequestTimeout() time.Duration {
+	if g == nil || g.RequestTimeout <= 0 {
+		return DefaultGatewayRequestTimeout
+	}
+	return g.RequestTimeout
+}
+
+// EffectiveHeartbeatInterval returns the SSE keep-alive cadence, nil-safe,
+// with the design default for unset values.
+func (g *GatewayConfig) EffectiveHeartbeatInterval() time.Duration {
+	if g == nil || g.HeartbeatInterval <= 0 {
+		return DefaultGatewayHeartbeatInterval
+	}
+	return g.HeartbeatInterval
+}
+
+// EffectiveMaxConcurrencyPerKey returns the per-key concurrency cap,
+// nil-safe, with the design default for unset values.
+func (g *GatewayConfig) EffectiveMaxConcurrencyPerKey() int {
+	if g == nil || g.MaxConcurrencyPerKey <= 0 {
+		return DefaultGatewayMaxConcurrency
+	}
+	return g.MaxConcurrencyPerKey
+}
+
+// EffectiveSessionRetention returns the gateway session retention horizon,
+// nil-safe, with the design default for unset values.
+func (g *GatewayConfig) EffectiveSessionRetention() time.Duration {
+	if g == nil || g.SessionRetention <= 0 {
+		return DefaultGatewaySessionRetention
+	}
+	return g.SessionRetention
+}
+
+// EffectiveThoughtMode returns the thought→SSE mapping, nil-safe, falling
+// back to the default for unset or unknown values.
+func (g *GatewayConfig) EffectiveThoughtMode() string {
+	if g == nil {
+		return DefaultGatewayThoughtMode
+	}
+	switch g.ThoughtMode {
+	case GatewayThoughtModeCollapse, GatewayThoughtModeDrop:
+		return g.ThoughtMode
+	default:
+		return DefaultGatewayThoughtMode
+	}
+}
+
+// EffectiveProgressMode returns the progress→SSE mapping, nil-safe, falling
+// back to the default for unset or unknown values.
+func (g *GatewayConfig) EffectiveProgressMode() string {
+	if g == nil {
+		return DefaultGatewayProgressMode
+	}
+	if g.ProgressMode == GatewayProgressModeDrop {
+		return GatewayProgressModeDrop
+	}
+	return DefaultGatewayProgressMode
+}
+
+// EffectiveCancelOnDisconnect reports whether a client disconnect should
+// cancel the internal run; the design default is true.
+func (g *GatewayConfig) EffectiveCancelOnDisconnect() bool {
+	return g == nil || g.CancelOnDisconnect == nil || *g.CancelOnDisconnect
+}
+
+// EffectivePathPrefix returns the gateway mount point, nil-safe, with the
+// design default for unset values.
+func (g *GatewayConfig) EffectivePathPrefix() string {
+	if g == nil || strings.TrimSpace(g.PathPrefix) == "" {
+		return DefaultGatewayPathPrefix
+	}
+	prefix := strings.TrimSpace(g.PathPrefix)
+	if !strings.HasPrefix(prefix, "/") {
+		prefix = "/" + prefix
+	}
+	return strings.TrimSuffix(prefix, "/")
 }
 
 // IsEnabled reports whether the gateway surface should be mounted; nil-safe
@@ -888,21 +1023,88 @@ func applyAgentEnvOverrides(cfg *Config) {
 	}
 }
 
-// applyGatewayEnvOverrides applies the GATEWAY_ENABLED opt-in for the
-// OpenAI-compatible model gateway. Accepts "1", "true", "yes", "on"
-// (case-insensitive) as enabling values; any other non-empty value disables.
+// applyGatewayEnvOverrides applies the GATEWAY_* overrides for the
+// OpenAI-compatible model gateway (docs §10). Boolean overrides accept
+// "1", "true", "yes", "on" (case-insensitive) as enabling values; any
+// other non-empty value disables.
 func applyGatewayEnvOverrides(cfg *Config) {
 	if cfg.Gateway == nil {
 		cfg.Gateway = &GatewayConfig{}
 	}
-	value := strings.TrimSpace(os.Getenv("GATEWAY_ENABLED"))
-	if value == "" {
-		return
+	gateway := cfg.Gateway
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_ENABLED")); value != "" {
+		gateway.Enabled = gatewayTruthy(value)
 	}
-	cfg.Gateway.Enabled = strings.EqualFold(value, "1") ||
+	applyGatewayTimeoutOverride(gateway)
+	applyGatewayDurationOverride("GATEWAY_HEARTBEAT_INTERVAL", func(d time.Duration) {
+		gateway.HeartbeatInterval = d
+	})
+	applyGatewayDurationOverride("GATEWAY_SESSION_RETENTION", func(d time.Duration) {
+		gateway.SessionRetention = d
+	})
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_MAX_CONCURRENCY_PER_KEY")); value != "" {
+		if n, err := strconv.Atoi(value); err == nil && n > 0 {
+			gateway.MaxConcurrencyPerKey = n
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_THOUGHT_MODE")); value != "" {
+		gateway.ThoughtMode = strings.ToLower(strings.TrimSpace(value))
+	}
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_PROGRESS_MODE")); value != "" {
+		gateway.ProgressMode = strings.ToLower(strings.TrimSpace(value))
+	}
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_AUDIT_PAYLOAD")); value != "" {
+		gateway.AuditPayload = gatewayTruthy(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_CANCEL_ON_DISCONNECT")); value != "" {
+		cancel := gatewayTruthy(value)
+		gateway.CancelOnDisconnect = &cancel
+	}
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_PATH_PREFIX")); value != "" {
+		gateway.PathPrefix = value
+	}
+}
+
+// gatewayTruthy is the shared truthy vocabulary for gateway env flags.
+func gatewayTruthy(value string) bool {
+	return strings.EqualFold(value, "1") ||
 		strings.EqualFold(value, "true") ||
 		strings.EqualFold(value, "yes") ||
 		strings.EqualFold(value, "on")
+}
+
+// applyGatewayDurationOverride reads a GATEWAY_* duration env var: a Go
+// duration ("90s", "10m") or a bare number meaning seconds. Invalid values
+// keep the configured default (no error surface — env overrides are
+// best-effort like the rest of the file).
+func applyGatewayDurationOverride(name string, set func(time.Duration)) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return
+	}
+	if d, err := time.ParseDuration(value); err == nil && d > 0 {
+		set(d)
+		return
+	}
+	if sec, err := strconv.ParseInt(value, 10, 64); err == nil && sec > 0 {
+		set(time.Duration(sec) * time.Second)
+	}
+}
+
+// applyGatewayTimeoutOverride reads GATEWAY_REQUEST_TIMEOUT: a Go duration
+// ("90s", "10m") or a bare number meaning seconds.
+func applyGatewayTimeoutOverride(gateway *GatewayConfig) {
+	value := strings.TrimSpace(os.Getenv("GATEWAY_REQUEST_TIMEOUT"))
+	if value == "" {
+		return
+	}
+	if d, err := time.ParseDuration(value); err == nil && d > 0 {
+		gateway.RequestTimeout = d
+		return
+	}
+	if sec, err := strconv.ParseInt(value, 10, 64); err == nil && sec > 0 {
+		gateway.RequestTimeout = time.Duration(sec) * time.Second
+	}
 }
 
 // applyAuthAndTenantDefaults fills in defaults for the Auth and Tenant

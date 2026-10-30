@@ -186,6 +186,15 @@ const (
 	AuditActionFAQImportStarted   AuditAction = "faq.import_started"
 	AuditActionFAQImportCompleted AuditAction = "faq.import_completed"
 	AuditActionFAQImportFailed    AuditAction = "faq.import_failed"
+
+	// AuditActionGatewayCompletion fires once per executed
+	// OpenAI-compatible gateway turn (POST /v1/chat/completions, M1
+	// milestones G3/G4). Details carry the credential fingerprint (key id
+	// + name, never the raw key), resolved agent, the caller's raw model
+	// string, stream flag, accumulated token usage, duration and end
+	// reason. Request bodies stay out of the audit trail unless the
+	// operator opts in via gateway.audit_payload (docs §6).
+	AuditActionGatewayCompletion AuditAction = "gateway.completion"
 )
 
 // AuditOutcome separates asynchronous acceptance from terminal business

@@ -659,6 +659,11 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	}))
 	must(container.Invoke(startForkSnapshotReaper))
 	logger.Debugf(ctx, "[Container] Fork snapshot reaper registered")
+	// Gateway session reaper (M1 G4): retires Kind=gateway audit sessions
+	// after gateway.session_retention (docs design §7.1).
+	must(container.Provide(service.NewGatewaySessionReaperFromRepos))
+	must(container.Invoke(startGatewaySessionReaper))
+	logger.Debugf(ctx, "[Container] Gateway session reaper registered")
 	must(container.Provide(func(
 		svc *sandboxalloc.Service, cleaner *sandboxalloc.WorkspaceCleaner,
 		configs repository.TenantSandboxConfigRepository, redisClient *redis.Client,
@@ -2201,6 +2206,39 @@ func startForkSnapshotReaper(reaper *service.ForkSnapshotReaper, cleaner interfa
 		}
 	}()
 	cleaner.RegisterWithName("ForkSnapshotReaper", func() error {
+		close(stop)
+		return nil
+	})
+}
+
+// startGatewaySessionReaper runs the gateway session reaper hourly. An hour
+// of slack beyond gateway.session_retention is harmless (the cutoff is
+// computed per pass), and the batch cap keeps each pass short.
+func startGatewaySessionReaper(reaper *service.GatewaySessionReaper, cleaner interfaces.ResourceCleaner) {
+	if reaper == nil {
+		logger.Warnf(context.Background(), "[Container] gateway session reaper unavailable")
+		return
+	}
+	if cleaner == nil {
+		logger.Warnf(context.Background(), "[Container] gateway session reaper start failed: resource cleaner missing")
+		return
+	}
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if _, err := reaper.ReapOnce(context.Background()); err != nil {
+					logger.Warnf(context.Background(), "[GatewaySessionReaper] reap failed: %v", err)
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	cleaner.RegisterWithName("GatewaySessionReaper", func() error {
 		close(stop)
 		return nil
 	})

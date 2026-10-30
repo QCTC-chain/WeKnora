@@ -8,7 +8,10 @@
 // Chat Completions API exactly — external clients parse them unmodified.
 package openai_compat
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // GatewayVersion is reported in the X-WeKnora-Gateway-Version response header
 // so clients can detect breaking wire changes early.
@@ -67,6 +70,24 @@ type ChatCompletionRequest struct {
 	// StreamOptions is accepted for wire compatibility; only include_usage
 	// matters and usage is always included.
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+	// Tools and ToolChoice are accepted for wire compatibility and ignored:
+	// M1 never executes client tools (docs §14). The count is echoed in the
+	// response meta as client_tools_ignored.
+	Tools      []ClientToolDefinition `json:"tools,omitempty"`
+	ToolChoice json.RawMessage        `json:"tool_choice,omitempty"`
+}
+
+// ClientToolDefinition mirrors one OpenAI tools[] entry (function flavor).
+type ClientToolDefinition struct {
+	Type     string           `json:"type,omitempty"` // "function"
+	Function ClientToolFnSpec `json:"function"`
+}
+
+// ClientToolFnSpec is the function declaration of a client tool.
+type ClientToolFnSpec struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 // StreamOptions mirrors the OpenAI stream_options object.
@@ -171,6 +192,23 @@ type ChatCompletionResponse struct {
 	Model   string                 `json:"model"` // the caller's model string, echoed
 	Choices []ChatCompletionChoice `json:"choices"`
 	Usage   *Usage                 `json:"usage,omitempty"`
+	// Meta carries non-standard WeKnora extensions (warnings, ignored
+	// params, tool-ignored count). OpenAI clients ignore unknown fields.
+	Meta *CompletionMeta `json:"meta,omitempty"`
+}
+
+// CompletionMeta is the non-standard response meta object.
+type CompletionMeta struct {
+	// Warnings reports renderer adjustments (dropped images, timeouts).
+	Warnings []string `json:"warnings,omitempty"`
+	// IgnoredParams echoes the sampling params the gateway dropped.
+	IgnoredParams []string `json:"ignored_params,omitempty"`
+	// ClientToolsIgnored counts received-but-not-executed client tools.
+	ClientToolsIgnored int `json:"client_tools_ignored,omitempty"`
+	// AgentID is the resolved agent UUID.
+	AgentID string `json:"agent_id,omitempty"`
+	// SessionID is the temporary gateway session; findable in the web UI.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // ChatCompletionChoice is one completion alternative (the gateway always
@@ -196,6 +234,9 @@ type ChatCompletionChunk struct {
 	Choices []ChunkChoice `json:"choices"`
 	// Usage is present only on the final chunk (OpenAI include_usage style).
 	Usage *Usage `json:"usage,omitempty"`
+	// Meta carries non-standard WeKnora extensions on the final chunk
+	// (warnings, session id). OpenAI clients ignore unknown fields.
+	Meta *CompletionMeta `json:"meta,omitempty"`
 }
 
 // ChunkChoice carries one incremental delta.

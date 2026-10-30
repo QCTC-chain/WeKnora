@@ -34,4 +34,5 @@ func RegisterOpenAICompatRoutes(
 	auth := middleware.GatewayAuth(tenantService, userService, apiKeyService)
 	grp := r.Group(GatewayV1BasePath, auth)
 	grp.GET("/models", gateway.ListModels)
+	grp.POST("/chat/completions", gateway.ChatCompletions)
 }
