@@ -31,10 +31,10 @@ func (f *fakeAgentService) ListAgents(context.Context) ([]*types.CustomAgent, er
 func publishedAgent(id, name string, published bool) *types.CustomAgent {
 	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
 	return &types.CustomAgent{
-		ID:      id,
-		Name:    name,
-		TenantID: 42,
-		Published: published,
+		ID:          id,
+		Name:        name,
+		TenantID:    42,
+		Published:   published,
 		PublishedAt: &now,
 		Config: types.CustomAgentConfig{
 			AgentMode:    types.AgentModeQuickAnswer,
@@ -51,7 +51,7 @@ var testGatewayCfg *config.Config
 // newTestHandler builds a GatewayHandler with optional gateway-side fakes;
 // nil sessions/messages keep list/resolve tests free of QA plumbing.
 func newTestHandler(svc *fakeAgentService, sessions interfaces.SessionService, messages interfaces.MessageService) *GatewayHandler {
-	return NewGatewayHandler(svc, sessions, messages, nil, testGatewayCfg)
+	return NewGatewayHandler(svc, sessions, messages, nil, nil, nil, nil, testGatewayCfg)
 }
 
 // serveModels mounts ListModels behind nothing (auth is the middleware's

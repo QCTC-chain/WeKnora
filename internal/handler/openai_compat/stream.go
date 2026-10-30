@@ -33,6 +33,12 @@ type sseStream struct {
 	model   string
 	created int64
 
+	// M2-6 telemetry: startedAt + agentID feed the TTFB histogram on the
+	// first content frame (keep-alive frames do not count).
+	startedAt time.Time
+	agentID   string
+	ttfbDone  bool
+
 	mu             sync.Mutex
 	contentStarted bool
 	closed         bool
@@ -40,16 +46,21 @@ type sseStream struct {
 
 func newSSEStream(c *gin.Context, model string) *sseStream {
 	return &sseStream{
-		c:       c,
-		id:      "chatcmpl-" + uuid.New().String(),
-		model:   model,
-		created: time.Now().Unix(),
+		c:         c,
+		id:        "chatcmpl-" + uuid.New().String(),
+		model:     model,
+		created:   time.Now().Unix(),
+		startedAt: time.Now(),
+		agentID:   "unknown",
 	}
 }
 
 // setHeaders installs the SSE response headers plus the gateway trace
 // headers. Call once before the first frame; gin writes the status with it.
 func (s *sseStream) setHeaders(agentID, sessionID string) {
+	if agentID != "" {
+		s.agentID = agentID
+	}
 	header := s.c.Writer.Header()
 	header.Set("Content-Type", "text/event-stream")
 	header.Set("Cache-Control", "no-cache")
@@ -99,6 +110,10 @@ func (s *sseStream) chunk(delta *Delta, finish string, usage *Usage, meta *Compl
 	if delta != nil && (delta.Content != "" || delta.ReasoningContent != "") {
 		s.mu.Lock()
 		s.contentStarted = true
+		if !s.ttfbDone {
+			s.ttfbDone = true
+			gatewayMetrics.observeTTFB(protoOpenAI, s.agentID, time.Since(s.startedAt))
+		}
 		s.mu.Unlock()
 	}
 	payload := ChatCompletionChunk{
@@ -147,9 +162,53 @@ func (s *sseStream) close() {
 	s.mu.Unlock()
 }
 
+// turnStream is the protocol-facing stream the shared gateway turn runner
+// writes to. Two implementations exist: sseStream (OpenAI chunk grammar,
+// M1) and anthropicStream (Anthropic Messages SSE grammar, M2-5). The
+// streamTranslator and runGatewayTurnStream are protocol-agnostic and talk
+// only to this interface.
+type turnStream interface {
+	// setHeaders installs SSE response headers + gateway trace headers.
+	setHeaders(agentID, sessionID string)
+	// beginAssistant emits the protocol's assistant-channel start frame.
+	beginAssistant()
+	// contentLine writes one status/tool/citation text line.
+	contentLine(line string)
+	// reasoningDelta streams uncollapsed reasoning thought.
+	reasoningDelta(text string)
+	// collapsedThought streams a collapsed thought (<think>…</think>).
+	collapsedThought(text string)
+	// errorFrame writes a mid-stream failure frame.
+	errorFrame(message string)
+	// finishFrame writes the terminal frame(s) with usage + meta.
+	finishFrame(usage *Usage, meta *CompletionMeta)
+	// close stops further writes (disconnect paths).
+	close()
+	// heartbeatTick emits the keep-alive (pre-content only).
+	heartbeatTick()
+}
+
+// --- sseStream as a turnStream (OpenAI grammar) ---
+
+func (s *sseStream) beginAssistant() { s.chunk(&Delta{Role: "assistant"}, "", nil, nil) }
+func (s *sseStream) contentLine(line string) {
+	s.chunk(&Delta{Content: line}, "", nil, nil)
+}
+func (s *sseStream) reasoningDelta(text string) {
+	s.chunk(&Delta{ReasoningContent: text}, "", nil, nil)
+}
+func (s *sseStream) collapsedThought(text string) {
+	s.chunk(&Delta{Content: "<think>" + text + "</think>"}, "", nil, nil)
+}
+func (s *sseStream) errorFrame(message string) { s.streamError(message) }
+func (s *sseStream) finishFrame(usage *Usage, meta *CompletionMeta) {
+	s.finish(usage, meta)
+}
+func (s *sseStream) heartbeatTick() { s.heartbeat() }
+
 // startHeartbeat runs the keep-alive ticker until stop is closed. The ticker
 // goroutine owns no state: s.heartbeat() no-ops once content started.
-func startHeartbeat(stream *sseStream, interval time.Duration, stop <-chan struct{}) {
+func startHeartbeat(stream turnStream, interval time.Duration, stop <-chan struct{}) {
 	if interval <= 0 {
 		interval = config.DefaultGatewayHeartbeatInterval
 	}
@@ -158,7 +217,7 @@ func startHeartbeat(stream *sseStream, interval time.Duration, stop <-chan struc
 	for {
 		select {
 		case <-ticker.C:
-			stream.heartbeat()
+			stream.heartbeatTick()
 		case <-stop:
 			return
 		}
@@ -169,7 +228,7 @@ func startHeartbeat(stream *sseStream, interval time.Duration, stop <-chan struc
 // mirrors the aggregator's accumulation so the assistant row is persisted
 // with exactly what the client saw (plus the citation block).
 type streamTranslator struct {
-	stream *sseStream
+	stream turnStream
 
 	// thoughtMode / progressMode come from the gateway config (docs §8):
 	// reasoning|collapse|drop and text|drop.
@@ -190,17 +249,83 @@ type streamTranslator struct {
 	usage       *Usage
 	failed      error
 
+	// M2-6 telemetry: internal rounds (complete.TotalSteps), the sampled
+	// event journal (audit_payload retention) and translation-drop counts.
+	startedAt time.Time
+	rounds    int
+	journal   []turnJournalEntry
+
 	done     chan struct{} // answer finished or failure arrived
 	complete chan struct{} // complete event or failure arrived
 	doneOnce sync.Once
 	compOnce sync.Once
 }
 
-func newStreamTranslator(stream *sseStream, thoughtMode, progressMode string) *streamTranslator {
+// turnJournalEntry is one sampled event-flow record (audit_payload §6).
+type turnJournalEntry struct {
+	// T is ms since the translator started.
+	T     int64  `json:"t_ms"`
+	Event string `json:"event"`
+	Note  string `json:"note,omitempty"`
+	Drops int    `json:"drops,omitempty"`
+}
+
+// turnTelemetry is the per-turn observability payload the stream runner
+// hands back to the completion handler (metrics + audit event log).
+type turnTelemetry struct {
+	Rounds int `json:"rounds"`
+	Drops  int `json:"drops"`
+	// AnswerRunes is the client-visible answer size (amplification input).
+	AnswerRunes int                `json:"answer_runes,omitempty"`
+	Events      []turnJournalEntry `json:"events,omitempty"`
+}
+
+// gatewayJournalMax caps the sampled event journal; beyond it only a drop
+// summary survives.
+const gatewayJournalMax = 40
+
+// journalDrop records a drop-flavored event-flow entry (counts toward the
+// telemetry drop total).
+func (t *streamTranslator) journalDrop(name, note string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.journalLocked(name, note)
+	if n := len(t.journal); n > 0 {
+		dropped(&t.journal[n-1])
+	}
+}
+
+// journalEvent records one event-flow entry (oldest-first, capped).
+func (t *streamTranslator) journalEvent(name, note string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.journalLocked(name, note)
+}
+
+// journalLocked appends when the caller already holds t.mu.
+func (t *streamTranslator) journalLocked(name, note string) {
+	entry := turnJournalEntry{
+		T:     time.Since(t.startedAt).Milliseconds(),
+		Event: name,
+		Note:  firstLine(note),
+	}
+	if len(entry.Note) > 160 {
+		entry.Note = string([]rune(entry.Note)[:160])
+	}
+	if len(t.journal) < gatewayJournalMax {
+		t.journal = append(t.journal, entry)
+		return
+	}
+	// Over the cap: keep the newest entries instead of growing.
+	t.journal = append(t.journal[:gatewayJournalMax-1], entry)
+}
+
+func newStreamTranslator(stream turnStream, thoughtMode, progressMode string) *streamTranslator {
 	return &streamTranslator{
 		stream:       stream,
 		thoughtMode:  thoughtMode,
 		progressMode: progressMode,
+		startedAt:    time.Now(),
 		done:         make(chan struct{}),
 		complete:     make(chan struct{}),
 	}
@@ -216,7 +341,7 @@ func (t *streamTranslator) content(line string) {
 	if strings.TrimSpace(line) == "" {
 		return
 	}
-	t.stream.chunk(&Delta{Content: line}, "", nil, nil)
+	t.stream.contentLine(line)
 }
 
 // register wires the translator onto the bus. Unknown/ignored event classes
@@ -229,11 +354,13 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 		}
 		switch t.thoughtMode {
 		case config.GatewayThoughtModeDrop:
+			gatewayMetrics.observeTranslationDrop(dropThoughtDropped)
+			t.journalDrop("thought", "dropped(thought_mode=drop)")
 			return nil
 		case config.GatewayThoughtModeCollapse:
 			t.content("<think>" + data.Content + "</think>")
 		default: // reasoning
-			t.stream.chunk(&Delta{ReasoningContent: data.Content}, "", nil, nil)
+			t.stream.reasoningDelta(data.Content)
 		}
 		return nil
 	})
@@ -243,7 +370,12 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 	}
 	bus.On(event.EventAgentToolCall, func(_ context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.AgentToolCallData)
-		if !ok || t.progressMode == config.GatewayProgressModeDrop {
+		if !ok {
+			return nil
+		}
+		if t.progressMode == config.GatewayProgressModeDrop {
+			gatewayMetrics.observeTranslationDrop(dropProgressDropped)
+			t.journalDrop("tool_call", data.ToolName+" dropped(progress_mode=drop)")
 			return nil
 		}
 		t.mu.Lock()
@@ -251,13 +383,20 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 		t.pendingTool = data.ToolName
 		t.mu.Unlock()
 		if pending != "" && pending != data.ToolName {
+			gatewayMetrics.observeTranslationDrop(dropToolMerged)
+			t.journalDrop("tool_call", pending+" merged into status line")
 			t.content(toolLine(pending, "调用中"))
 		}
 		return nil
 	})
 	bus.On(event.EventAgentToolResult, func(_ context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.AgentToolResultData)
-		if !ok || t.progressMode == config.GatewayProgressModeDrop {
+		if !ok {
+			return nil
+		}
+		if t.progressMode == config.GatewayProgressModeDrop {
+			gatewayMetrics.observeTranslationDrop(dropProgressDropped)
+			t.journalDrop("tool_result", data.ToolName+" dropped(progress_mode=drop)")
 			return nil
 		}
 		t.mu.Lock()
@@ -270,6 +409,8 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 		}
 		if pending != "" && pending != data.ToolName {
 			// A previous tool never got its result; show it first.
+			gatewayMetrics.observeTranslationDrop(dropToolMerged)
+			t.journalDrop("tool_call", pending+" merged into status line")
 			t.content(toolLine(pending, "调用中"))
 		}
 		t.content(toolLine(data.ToolName, status))
@@ -277,7 +418,12 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 	})
 	bus.On(event.EventAgentProgress, func(_ context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.AgentProgressData)
-		if !ok || t.progressMode == config.GatewayProgressModeDrop {
+		if !ok {
+			return nil
+		}
+		if t.progressMode == config.GatewayProgressModeDrop {
+			gatewayMetrics.observeTranslationDrop(dropProgressDropped)
+			t.journalDrop("progress", "dropped(progress_mode=drop)")
 			return nil
 		}
 		t.content(firstLine(data.Content))
@@ -285,7 +431,12 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 	})
 	bus.On(event.EventAgentCommandOutput, func(_ context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.CommandOutputData)
-		if !ok || t.progressMode == config.GatewayProgressModeDrop {
+		if !ok {
+			return nil
+		}
+		if t.progressMode == config.GatewayProgressModeDrop {
+			gatewayMetrics.observeTranslationDrop(dropProgressDropped)
+			t.journalDrop("command_output", "dropped(progress_mode=drop)")
 			return nil
 		}
 		command := strings.TrimSpace(data.Command)
@@ -313,7 +464,7 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 		}
 		t.mu.Unlock()
 		if strings.TrimSpace(data.Content) != "" {
-			t.stream.chunk(&Delta{Content: data.Content}, "", nil, nil)
+			t.stream.contentLine(data.Content)
 		}
 		return nil
 	})
@@ -346,6 +497,8 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 				TotalTokens:      int64(tu.TotalTokens),
 			}
 		}
+		t.rounds = data.TotalSteps
+		t.journalLocked("complete", fmt.Sprintf("rounds=%d", data.TotalSteps))
 		t.closeComplete()
 		t.mu.Unlock()
 		return nil
@@ -387,6 +540,27 @@ func (t *streamTranslator) fail(err error) {
 	t.mu.Unlock()
 }
 
+// telemetry aggregates the M2-6 observability payload: internal rounds,
+// translation-drop count and the sampled event journal. Drop entries are
+// tagged at record time via the dropped() helper.
+func (t *streamTranslator) telemetry() *turnTelemetry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	tel := &turnTelemetry{Rounds: t.rounds, AnswerRunes: t.answer.Len()}
+	drops := 0
+	for _, entry := range t.journal {
+		drops += entry.Drops
+	}
+	tel.Drops = drops
+	if len(t.journal) > 0 {
+		tel.Events = append(tel.Events, t.journal...)
+	}
+	return tel
+}
+
+// dropped marks a journal entry as a translation drop.
+func dropped(entry *turnJournalEntry) { entry.Drops = 1 }
+
 // snapshot returns the accumulated answer, references, usage and failure.
 func (t *streamTranslator) snapshot() (string, []*types.SearchResult, *Usage, error) {
 	t.mu.Lock()
@@ -410,13 +584,13 @@ func (h *GatewayHandler) runGatewayTurnStream(
 	session *types.Session,
 	agent *types.CustomAgent,
 	turn *renderedTurn,
-	stream *sseStream,
-) (string, *Usage) {
+	stream turnStream,
+) (string, *Usage, *turnTelemetry) {
 	userMsg, assistantMsg, err := h.createTurnMessages(ctx, session, turn)
 	if err != nil {
-		stream.streamError("Failed to create gateway messages")
-		stream.finish(nil, nil)
-		return "error", nil
+		stream.errorFrame("Failed to create gateway messages")
+		stream.finishFrame(nil, nil)
+		return "error", nil, &turnTelemetry{}
 	}
 
 	translator := newStreamTranslator(
@@ -443,7 +617,7 @@ func (h *GatewayHandler) runGatewayTurnStream(
 	go startHeartbeat(stream, h.gateway.EffectiveHeartbeatInterval(), hbStop)
 
 	// First protocol frame: the assistant role delta.
-	stream.chunk(&Delta{Role: "assistant"}, "", nil, nil)
+	stream.beginAssistant()
 
 	reason := "completed"
 	select {
@@ -469,8 +643,8 @@ func (h *GatewayHandler) runGatewayTurnStream(
 
 	text, refs, usage, failure := translator.snapshot()
 	meta := &CompletionMeta{
-		Warnings: turn.Warnings,
-		AgentID:  agent.ID,
+		Warnings:  turn.Warnings,
+		AgentID:   agent.ID,
 		SessionID: session.ID,
 	}
 
@@ -486,14 +660,14 @@ func (h *GatewayHandler) runGatewayTurnStream(
 		translator.content("\n" + note)
 		text += "\n" + note
 		meta.Warnings = append(meta.Warnings, "[网关] 响应超时,返回已产生的部分内容")
-		stream.finish(usage, meta)
+		stream.finishFrame(usage, meta)
 	case failure != nil:
-		stream.streamError("Agent run failed: " + failure.Error())
+		stream.errorFrame("Agent run failed: " + failure.Error())
 		if strings.TrimSpace(text) == "" {
 			text = "The answer failed: " + failure.Error()
 		}
 		reason = "error"
-		stream.finish(usage, meta)
+		stream.finishFrame(usage, meta)
 	default:
 		if strings.TrimSpace(text) == "" {
 			text = "No answer could be produced for this question."
@@ -508,11 +682,11 @@ func (h *GatewayHandler) runGatewayTurnStream(
 				text += "\n" + citations
 			}
 		}
-		stream.finish(usage, meta)
+		stream.finishFrame(usage, meta)
 	}
 
 	finalizeGatewayMessage(context.WithoutCancel(ctx), h.messages, assistantMsg, text, refs)
-	return reason, usage
+	return reason, usage, translator.telemetry()
 }
 
 // timeoutReason classifies a runCtx cancellation: a cancelled request

@@ -5,6 +5,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
@@ -533,6 +534,19 @@ func (s *sessionService) UpdateSessionLastRequestState(
 		logger.Warnf(ctx, "UpdateSessionLastRequestState: no rows affected for session %s", sessionID)
 	}
 	return nil
+}
+
+// FindGatewayThreadSession resolves the M2-3 gateway continuation anchor;
+// thin pass-through to the repository (the gateway owns all policy).
+func (s *sessionService) FindGatewayThreadSession(
+	ctx context.Context, tenantID uint64, ownerUserID, agentID string, activeAfter time.Time,
+) (*types.Session, error) {
+	return s.sessionRepo.FindGatewayThreadSession(ctx, tenantID, ownerUserID, agentID, activeAfter)
+}
+
+// TouchGatewaySession slides a reused gateway thread's retention window.
+func (s *sessionService) TouchGatewaySession(ctx context.Context, sessionID string) error {
+	return s.sessionRepo.TouchGatewaySession(ctx, sessionID)
 }
 
 // DeleteSession removes a session by its ID

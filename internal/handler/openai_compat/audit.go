@@ -3,6 +3,7 @@ package openai_compat
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -26,13 +27,25 @@ type gatewayTurnAudit struct {
 	KeyID   uint64
 	KeyName string
 	AgentID string
+	// SessionID is the temporary gateway session the turn ran in (usage
+	// rows link to it; audit details omit it as the session is transient).
+	SessionID string
 	// Model is the caller's raw model string, echoed for mismatch diagnosis.
-	Model  string
+	Model string
+	// Stream / Query / Warnings feed the audit details; Query retention is
+	// gated by the audit_payload flag.
 	Stream bool
 	Query  string
+	// Telemetry carries M2-6 observability (rounds + sampled event log);
+	// only the rounds count lands unconditionally, the journal requires
+	// the audit_payload flag.
+	Telemetry *turnTelemetry
 	// EndReason: completed | error | timeout | disconnect |
 	// disconnect_run_completed.
 	EndReason string
+	// StatusCode is the HTTP status the gateway answers with (200 for a
+	// successful turn, 500 for an error, etc.).
+	StatusCode int
 	// Duration is the handler-side wall time of the turn.
 	Duration time.Duration
 	Usage    *Usage
@@ -40,10 +53,12 @@ type gatewayTurnAudit struct {
 	Warnings []string
 }
 
-// auditGatewayTurn writes one gateway.completion audit row. Audit failures
-// are logged but never fail the completion: the answer already left, and a
-// broken audit sink must not turn a successful turn into a 500.
+// auditGatewayTurn writes one gateway.completion audit row and the M2-b
+// gateway_usage metering row. Audit/metering failures are logged but never
+// fail the completion: the answer already left, and a broken sink must not
+// turn a successful turn into a 500.
 func (h *GatewayHandler) auditGatewayTurn(ctx context.Context, turn gatewayTurnAudit) {
+	h.recordGatewayTurnUsage(ctx, turn.TenantID, turn, turn.StatusCode)
 	if h.audit == nil {
 		return
 	}
@@ -57,6 +72,9 @@ func (h *GatewayHandler) auditGatewayTurn(ctx context.Context, turn gatewayTurnA
 		"duration_ms":   turn.Duration.Milliseconds(),
 		"gateway_proto": GatewayVersion,
 	}
+	if turn.SessionID != "" {
+		details["session_id"] = turn.SessionID
+	}
 	if turn.Usage != nil {
 		details["prompt_tokens"] = turn.Usage.PromptTokens
 		details["completion_tokens"] = turn.Usage.CompletionTokens
@@ -67,6 +85,17 @@ func (h *GatewayHandler) auditGatewayTurn(ctx context.Context, turn gatewayTurnA
 	}
 	if h.gateway != nil && h.gateway.AuditPayload && turn.Query != "" {
 		details["query"] = truncateRunes(turn.Query, gatewayAuditPayloadMaxRunes)
+		// M2-6 §6: sampled post-render event journal rides the same opt-in
+		// flag, giving support a request-local event timeline.
+		if turn.Telemetry != nil && len(turn.Telemetry.Events) > 0 {
+			details["event_log"] = turn.Telemetry.Events
+			if turn.Telemetry.Drops > 0 {
+				details["event_drops"] = turn.Telemetry.Drops
+			}
+		}
+	}
+	if turn.Telemetry != nil && turn.Telemetry.Rounds > 0 {
+		details["internal_rounds"] = turn.Telemetry.Rounds
 	}
 
 	outcome := types.AuditOutcomeSuccess
@@ -75,6 +104,9 @@ func (h *GatewayHandler) auditGatewayTurn(ctx context.Context, turn gatewayTurnA
 		outcome = types.AuditOutcomeFailed
 	case "timeout", "disconnect":
 		outcome = types.AuditOutcomeCanceled
+	}
+	if turn.StatusCode == 0 {
+		turn.StatusCode = http.StatusOK
 	}
 
 	detailsRaw, _ := json.Marshal(details)

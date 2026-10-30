@@ -55,6 +55,18 @@ type renderedTurn struct {
 // Client tool traffic is textualized (the gateway never executes client
 // tools), and image parts become ImageURLs for the existing upload chain.
 // The renderer is a pure function: same input, same output, no I/O.
+// lastUserMessageIndex returns the index of the last user-role message, or
+// -1 when none exists. M2-3 continuation renders from this slice boundary:
+// only the newest user turn is sent; WeKnora session history supplies the rest.
+func lastUserMessageIndex(messages []ChatMessage) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return i
+		}
+	}
+	return -1
+}
+
 func renderMessages(messages []ChatMessage, imagesAllowed bool) (*renderedTurn, error) {
 	turn := &renderedTurn{}
 

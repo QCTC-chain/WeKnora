@@ -127,6 +127,31 @@ type CustomAgent struct {
 	// PublishedAt records the last publish instant; cleared on unpublish.
 	PublishedAt *time.Time `yaml:"published_at" json:"published_at,omitempty"`
 
+	// ===== Gateway publish governance (M2-a, docs/design/agent-model-gateway-m2-m3.md §1) =====
+
+	// GatewayScope narrows WHO may call the published agent through the
+	// gateway. Empty means "tenant" (the M1 default, kept for legacy rows).
+	//   private: only callers whose principal user is the agent creator;
+	//   org:     plus every tenant that shares an organization the agent is
+	//            published to (the existing agent_shares system; a share only
+	//            counts while both the source and caller tenants remain members);
+	//   tenant:  every gateway credential of the agent's workspace.
+	GatewayScope string `yaml:"gateway_scope" json:"gateway_scope,omitempty" gorm:"column:published_scope;type:varchar(16);default:'tenant'"`
+	// GatewayVersion is the publish snapshot version: bumped on every
+	// publish, exposed as /v1/models meta.version. Zero = never published.
+	GatewayVersion int64 `yaml:"gateway_version" json:"gateway_version,omitempty" gorm:"column:published_version"`
+	// GatewaySnapshot is the agent config frozen at publish time. The
+	// gateway resolves and executes this snapshot, so editing the live agent
+	// no longer changes the published face until the next publish. Nil on
+	// legacy rows (M1 published before governance) means "use the live
+	// config" — publishing again under M2 freezes one.
+	GatewaySnapshot *CustomAgentConfig `yaml:"gateway_snapshot" json:"gateway_snapshot,omitempty" gorm:"column:published_config;type:json"`
+	// GatewaySunset marks the "deprecated" transition state: while set and
+	// in the future the agent stays callable but every gateway response
+	// carries `X-WeKnora-Deprecation: sunset=<RFC3339>`; once the instant
+	// passes it resolves as unpublished (lazy check — no cron needed).
+	GatewaySunset *time.Time `yaml:"gateway_sunset" json:"gateway_sunset,omitempty" gorm:"column:deprecation_sunset"`
+
 	// Timestamps
 	CreatedAt time.Time      `yaml:"created_at" json:"created_at"`
 	UpdatedAt time.Time      `yaml:"updated_at" json:"updated_at" extensions:"x-agent"`
@@ -136,6 +161,86 @@ type CustomAgent struct {
 	// 让前端列表卡片区分「我创建」与「同空间其他成员创建」。不落库，内建 agent / 老数据
 	// 仍可能为空。
 	CreatorName string `yaml:"-" json:"creator_name,omitempty" gorm:"-" extensions:"x-agent"`
+}
+
+// Gateway publish scopes (M2-a). Stored in custom_agents.published_scope.
+const (
+	// GatewayScopePrivate: creator's own credentials only.
+	GatewayScopePrivate = "private"
+	// GatewayScopeOrg: own tenant + tenants sharing an org the agent is
+	// published to.
+	GatewayScopeOrg = "org"
+	// GatewayScopeTenant: every credential of the agent's workspace — the
+	// M1 default and the zero-value for legacy rows.
+	GatewayScopeTenant = "tenant"
+)
+
+// ValidGatewayScope reports whether s is one of the three publish scopes.
+func ValidGatewayScope(s string) bool {
+	switch s {
+	case GatewayScopePrivate, GatewayScopeOrg, GatewayScopeTenant:
+		return true
+	}
+	return false
+}
+
+// GatewayPublishUpdate carries one gateway publish/unpublish request with
+// the M2-a governance fields. PublishSet distinguishes "request did not
+// touch the published flag" (governance-only scope/sunset PATCH) from an
+// explicit publish/unpublish.
+type GatewayPublishUpdate struct {
+	// PublishSet marks that the request explicitly set the published flag.
+	// With it unset, Published is ignored (governance-only update).
+	PublishSet bool
+	// Published is the target state of the publish flag; publishing on an
+	// already-published agent releases a new version (snapshot refresh +
+	// version bump) instead of being a no-op.
+	Published bool
+	// Scope optionally sets published_scope (private|org|tenant). Nil keeps
+	// the stored value; a first publish falls back to tenant when empty.
+	Scope *string
+	// Sunset optionally sets deprecation_sunset. Must be in the future when
+	// combined with publish; rejecting past instants avoids publishing an
+	// agent that resolves as unpublished on the very next request.
+	Sunset *time.Time
+	// SunsetClear removes an existing sunset (PATCH deprecation_sunset:null).
+	SunsetClear bool
+}
+
+// EffectiveGatewayScope maps the empty/legacy value to the M1 default.
+func (a *CustomAgent) EffectiveGatewayScope() string {
+	if a == nil || !ValidGatewayScope(a.GatewayScope) {
+		return GatewayScopeTenant
+	}
+	return a.GatewayScope
+}
+
+// GatewaySunsetExpired reports whether the deprecation sunset has passed,
+// meaning the agent resolves as unpublished on the gateway.
+func (a *CustomAgent) GatewaySunsetExpired(now time.Time) bool {
+	if a == nil || a.GatewaySunset == nil {
+		return false
+	}
+	return !a.GatewaySunset.After(now)
+}
+
+// GatewayDeprecated reports whether the agent is in the deprecated
+// transition window: published, sunset set, not yet expired.
+func (a *CustomAgent) GatewayDeprecated(now time.Time) bool {
+	return a != nil && a.GatewaySunset != nil && !a.GatewaySunsetExpired(now)
+}
+
+// GatewayEffectiveConfig returns the config the gateway executes: the
+// publish snapshot when one was frozen, else the live config (legacy M1
+// rows published before governance have no snapshot yet).
+func (a *CustomAgent) GatewayEffectiveConfig() CustomAgentConfig {
+	if a == nil {
+		return CustomAgentConfig{}
+	}
+	if a.GatewaySnapshot != nil {
+		return *a.GatewaySnapshot
+	}
+	return a.Config
 }
 
 // maxAgentAvatarLength mirrors the custom_agents.avatar column limit

@@ -19,8 +19,8 @@ const GatewayVersion = "1"
 
 // ModelListResponse is the GET /v1/models body.
 type ModelListResponse struct {
-	Object string        `json:"object"` // always "list"
-	Data   []ModelEntry  `json:"data"`
+	Object string       `json:"object"` // always "list"
+	Data   []ModelEntry `json:"data"`
 }
 
 // ModelEntry is one published agent as an OpenAI model.
@@ -47,10 +47,22 @@ type ModelMeta struct {
 	AgentName string `json:"agent_name,omitempty"`
 	// Description is the agent's description, trimmed for list payloads.
 	Description string `json:"description,omitempty"`
-	// AgentMode is quick-answer or smart-reasoning.
+	// AgentMode is quick-answer or smart-reasoning (from the publish
+	// snapshot when one exists).
 	AgentMode string `json:"agent_mode,omitempty"`
 	// IsBuiltin marks workspace built-in agents.
 	IsBuiltin bool `json:"is_builtin,omitempty"`
+	// Version is the publish snapshot version (M2-a): bumped on every
+	// publish; the value /v1/chat/completions executes.
+	Version int64 `json:"version,omitempty"`
+	// Scope is the published_scope: private | org | tenant (M2-a).
+	Scope string `json:"scope,omitempty"`
+	// Deprecated marks the deprecation transition (M2-a): the model is
+	// callable but scheduled for removal; pair with sunset_at.
+	Deprecated bool `json:"deprecated,omitempty"`
+	// SunsetAt is the RFC3339 instant after which the model resolves as
+	// unpublished (M2-a deprecation sunset).
+	SunsetAt string `json:"sunset_at,omitempty"`
 }
 
 // ChatCompletionRequest is the accepted subset of the OpenAI request.
@@ -241,9 +253,9 @@ type ChatCompletionChunk struct {
 
 // ChunkChoice carries one incremental delta.
 type ChunkChoice struct {
-	Index        int           `json:"index"`
-	Delta        *Delta        `json:"delta,omitempty"`
-	FinishReason string        `json:"finish_reason"` // "" until final
+	Index        int    `json:"index"`
+	Delta        *Delta `json:"delta,omitempty"`
+	FinishReason string `json:"finish_reason"` // "" until final
 }
 
 // Delta is the incremental payload of a chunk. Exactly one field is typically

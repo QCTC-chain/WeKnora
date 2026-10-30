@@ -74,6 +74,10 @@ type TenantAPIKeyCreateRequest struct {
 	KnowledgeBaseIDs []string
 	Capabilities     []string
 	ExpiresAt        *time.Time
+	// M2-b gateway grants/quotas (nil/empty = unrestricted defaults).
+	AgentGrants        []string
+	DailyTokenBudget   *int64
+	DailyRequestBudget *int64
 }
 
 type TenantAPIKeyCreateResult struct {
@@ -84,13 +88,16 @@ type TenantAPIKeyCreateResult struct {
 // TenantAPIKeyUpdateRequest 修改已创建租户 API Key 的可配置属性。
 // 配置语义与创建接口一致：FullAccess 为 true 时忽略细粒度能力和知识库范围。
 type TenantAPIKeyUpdateRequest struct {
-	TenantID         uint64
-	APIKeyID         uint64
-	Name             string
-	FullAccess       bool
-	KnowledgeBaseIDs []string
-	Capabilities     []string
-	ExpiresAt        *time.Time
+	TenantID           uint64
+	APIKeyID           uint64
+	Name               string
+	FullAccess         bool
+	KnowledgeBaseIDs   []string
+	Capabilities       []string
+	ExpiresAt          *time.Time
+	AgentGrants        []string
+	DailyTokenBudget   *int64
+	DailyRequestBudget *int64
 }
 
 type TenantAPIKeyRepository interface {

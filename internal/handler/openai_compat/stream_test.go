@@ -432,7 +432,7 @@ func TestGatewayAuditPerTurn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	fakes := streamFakes(answerScript)
 	router := gin.New()
-	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, audit, nil)
+	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, audit, nil, nil, nil, nil)
 	router.POST("/v1/chat/completions", func(c *gin.Context) {
 		ctx := context.WithValue(c.Request.Context(), types.TenantIDContextKey, uint64(42))
 		// GatewayAuth attaches the key scope; simulate the minimal shape.
@@ -497,7 +497,7 @@ func serveCompletionsWithAudit(t *testing.T, fakes completionsFakes, audit *fake
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, audit, testGatewayCfg)
+	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, audit, nil, nil, nil, testGatewayCfg)
 	router.POST("/v1/chat/completions", func(c *gin.Context) {
 		ctx := context.WithValue(c.Request.Context(), types.TenantIDContextKey, uint64(42))
 		ctx = context.WithValue(ctx, types.TenantAPIKeyScopeContextKey, types.TenantAPIKeyScope{
@@ -518,7 +518,7 @@ func TestPerKeyConcurrencyLimit(t *testing.T) {
 	// so both requests must hit the same instance.
 	release := make(chan struct{})
 	fakes := completionsFakes{
-		agents:   &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
+		agents: &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
 		sessions: &fakeGatewaySessions{script: func(bus *event.EventBus, _ *types.QARequest) error {
 			<-release
 			return answerScript(bus, nil)
@@ -566,7 +566,7 @@ func newCompletionsRouter(t *testing.T, fakes completionsFakes, cfg *config.Conf
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, nil, cfg)
+	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, nil, nil, nil, nil, cfg)
 	router.POST("/v1/chat/completions", func(c *gin.Context) {
 		ctx := context.WithValue(c.Request.Context(), types.TenantIDContextKey, uint64(42))
 		c.Request = c.Request.WithContext(ctx)
@@ -592,7 +592,7 @@ func TestPerKeyConcurrencyIndependentKeysAndUnlimited(t *testing.T) {
 
 	slots := make(chan struct{}, 2)
 	fakes := completionsFakes{
-		agents:   &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
+		agents: &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
 		sessions: &fakeGatewaySessions{script: func(bus *event.EventBus, _ *types.QARequest) error {
 			slots <- struct{}{}
 			<-slots

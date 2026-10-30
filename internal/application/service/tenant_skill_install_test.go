@@ -3174,7 +3174,7 @@ func (s *installCustomAgentService) UpdateAgent(
 func (s *installCustomAgentService) DeleteAgent(context.Context, string) error { return nil }
 
 func (s *installCustomAgentService) SetAgentPublished(
-	context.Context, string, bool,
+	context.Context, string, types.GatewayPublishUpdate,
 ) (*types.CustomAgent, error) {
 	return nil, nil
 }
@@ -3277,6 +3277,19 @@ func (e *installAgentEngine) Resume(context.Context, string, string, []chat.Mess
 
 type installSessionService struct {
 	fx *installFixture
+}
+
+// FindGatewayThreadSession/TouchGatewaySession are M2-c interface methods;
+// the skill-install flow never uses gateway threads, so they stay unused.
+func (s *installSessionService) FindGatewayThreadSession(
+	context.Context, uint64, string, string, time.Time,
+) (*types.Session, error) {
+	return nil, nil
+}
+
+func (s *installSessionService) TouchGatewaySession(_ context.Context, _ string) error {
+	s.fx.sessionCalls = append(s.fx.sessionCalls, "TouchGatewaySession")
+	return nil
 }
 
 func (s *installSessionService) CreateSession(_ context.Context, session *types.Session) (*types.Session, error) {

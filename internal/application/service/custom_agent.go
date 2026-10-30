@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/rand"
 	"strings"
@@ -27,6 +28,13 @@ var (
 	// in the same workspace. Published names double as /v1 model ids, so they
 	// must stay unambiguous for external clients.
 	ErrAgentPublishedNameConflict = errors.New("another published agent already uses this name")
+	// ErrInvalidGatewayScope rejects a publish-governance PATCH whose
+	// published_scope is not one of private|org|tenant.
+	ErrInvalidGatewayScope = errors.New("published_scope must be private, org or tenant")
+	// ErrInvalidGatewaySunset rejects a deprecation sunset that is not in the
+	// future — publishing an already-expired sunset would resolve as
+	// unpublished on the next request and only confuse callers.
+	ErrInvalidGatewaySunset = errors.New("deprecation_sunset must be in the future")
 )
 
 const (
@@ -332,22 +340,37 @@ func (s *customAgentService) UpdateAgent(
 	return existingAgent, nil
 }
 
-// SetAgentPublished flips the gateway publish flag of an agent.
+// SetAgentPublished applies a gateway publish/unpublish with the M2-a
+// governance semantics (docs/design/agent-model-gateway-m2-m3.md §1):
 //
-// Publishing enforces uniqueness of the agent name among the workspace's
-// published agents (trimmed, case-insensitive): the name doubles as a
-// human-readable model id on GET /v1/models, so two published agents with
-// the same name would make model resolution ambiguous for external clients.
-// Built-in agents are rejected: their rows may be absent locally (they are
-// synthesized from the registry on read) and their lifecycle is
-// registry-managed, so gateway publish for them waits for the M2 release
-// governance work.
+//   - publish freezes a config snapshot (published_config) and bumps
+//     published_version; publishing an already-published agent releases a
+//     new version (snapshot refresh), so post-publish edits stop changing
+//     the gateway face until the next publish;
+//   - published_scope narrows visibility (private = creator's credentials
+//     only, org = plus org-share member tenants, tenant = whole workspace);
+//   - deprecation_sunset marks the deprecated transition: callable until
+//     the instant, then resolving as unpublished (lazy check, no cron);
+//   - unpublish clears the sunset and keeps the dormant snapshot/version
+//     so the next publish continues the version history.
+//
+// Name uniqueness among published agents (trimmed, case-insensitive) is
+// still enforced on every publish: the name doubles as a human-readable
+// model id on GET /v1/models. Built-in agents are rejected: their rows may
+// be absent locally (they are synthesized from the registry on read) and
+// their lifecycle is registry-managed.
 func (s *customAgentService) SetAgentPublished(
-	ctx context.Context, id string, published bool,
+	ctx context.Context, id string, upd types.GatewayPublishUpdate,
 ) (*types.CustomAgent, error) {
 	tenantID, ok := types.TenantIDFromContext(ctx)
 	if !ok {
 		return nil, ErrInvalidTenantID
+	}
+	if upd.Scope != nil && !types.ValidGatewayScope(*upd.Scope) {
+		return nil, ErrInvalidGatewayScope
+	}
+	if upd.Sunset != nil && !upd.Sunset.After(time.Now()) {
+		return nil, ErrInvalidGatewaySunset
 	}
 	existing, err := s.repo.GetAgentByID(ctx, id, tenantID)
 	if err != nil {
@@ -359,33 +382,92 @@ func (s *customAgentService) SetAgentPublished(
 	if existing.IsBuiltin {
 		return nil, ErrCannotModifyBuiltin
 	}
-	if existing.Published == published {
-		// Idempotent no-op: still return the current row so callers always
-		// get the agent the flag now (already) points at.
-		return existing, nil
+
+	scopeChanged, sunsetChanged := false, false
+	if upd.Scope != nil && *upd.Scope != existing.GatewayScope {
+		existing.GatewayScope = *upd.Scope
+		scopeChanged = true
 	}
-	if published {
+	if upd.Sunset != nil && (existing.GatewaySunset == nil || !upd.Sunset.Equal(*existing.GatewaySunset)) {
+		existing.GatewaySunset = upd.Sunset
+		sunsetChanged = true
+	}
+	if upd.SunsetClear && existing.GatewaySunset != nil {
+		existing.GatewaySunset = nil
+		sunsetChanged = true
+	}
+	if !types.ValidGatewayScope(existing.GatewayScope) {
+		// Legacy rows never published under governance: pin the M1 default.
+		existing.GatewayScope = types.GatewayScopeTenant
+		scopeChanged = true
+	}
+
+	publishApplied := false
+	switch {
+	case upd.PublishSet && upd.Published:
+		// Publish intent: fresh publish OR re-publish of a published agent.
+		// Re-publishing releases a new version (snapshot refresh + version
+		// bump) so operators get a one-call "ship current config" flow.
 		if err := s.ensurePublishedNameAvailable(ctx, tenantID, existing.ID, existing.Name); err != nil {
 			return nil, err
 		}
 		now := time.Now()
-		existing.Published = true
-		existing.PublishedAt = &now
-	} else {
+		if !existing.Published {
+			existing.Published = true
+			existing.PublishedAt = &now
+		}
+		existing.GatewayVersion++
+		snapshot := cloneAgentConfig(existing.Config)
+		existing.GatewaySnapshot = &snapshot
+		publishApplied = true
+	case upd.PublishSet && !upd.Published && existing.Published:
+		// Unpublish: flag down, sunset cleared, snapshot/version kept dormant
+		// so the next publish continues the version history.
 		existing.Published = false
 		existing.PublishedAt = nil
+		if existing.GatewaySunset != nil {
+			existing.GatewaySunset = nil
+			sunsetChanged = true
+		}
+		publishApplied = true
+	}
+	if !publishApplied && !scopeChanged && !sunsetChanged {
+		// Idempotent no-op: still return the current row so callers always
+		// get the agent the flags now (already) point at.
+		return existing, nil
 	}
 	existing.UpdatedAt = time.Now()
 	if err := s.repo.UpdateAgent(ctx, existing); err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{"agent_id": id})
 		return nil, err
 	}
-	if published {
-		logger.Infof(ctx, "Agent published for model gateway, ID: %s", id)
-	} else {
+	switch {
+	case publishApplied && existing.Published:
+		logger.Infof(ctx, "Agent published for model gateway, ID: %s version=%d scope=%s",
+			id, existing.GatewayVersion, existing.EffectiveGatewayScope())
+	case publishApplied:
 		logger.Infof(ctx, "Agent unpublished from model gateway, ID: %s", id)
+	default:
+		logger.Infof(ctx, "Agent gateway governance updated, ID: %s scope_changed=%v sunset_changed=%v",
+			id, scopeChanged, sunsetChanged)
 	}
 	return existing, nil
+}
+
+// cloneAgentConfig deep-copies a config via JSON so the publish snapshot
+// shares no mutable state with the live row.
+func cloneAgentConfig(cfg types.CustomAgentConfig) types.CustomAgentConfig {
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		// CustomAgentConfig marshals unconditionally in Value(); a marshal
+		// failure would mean a corrupt config — return an empty snapshot.
+		return types.CustomAgentConfig{}
+	}
+	var out types.CustomAgentConfig
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return types.CustomAgentConfig{}
+	}
+	return out
 }
 
 // ensurePublishedNameAvailable rejects a publish when another published

@@ -195,6 +195,18 @@ const (
 	// reason. Request bodies stay out of the audit trail unless the
 	// operator opts in via gateway.audit_payload (docs §6).
 	AuditActionGatewayCompletion AuditAction = "gateway.completion"
+
+	// AuditActionGatewayPublish fires when an agent is published to the
+	// gateway (M2-a governance). Details carry the operator, the frozen
+	// snapshot version, the chosen scope and any deprecation sunset.
+	AuditActionGatewayPublish AuditAction = "gateway.publish"
+	// AuditActionGatewayUnpublish fires when an agent leaves the gateway
+	// (manual unpublish; sunset expiry resolves lazily and is NOT audited —
+	// there is no operator action to attribute).
+	AuditActionGatewayUnpublish AuditAction = "gateway.unpublish"
+	// AuditActionGatewayGovernance fires for publish-scope or deprecation
+	// changes that do not flip the published bit.
+	AuditActionGatewayGovernance AuditAction = "gateway.governance"
 )
 
 // AuditOutcome separates asynchronous acceptance from terminal business

@@ -47,6 +47,8 @@ var versionedSQLiteTables = []string{
 	"notifications",
 	"session_sandbox_assignments",
 	"sandbox_user_machines",
+	"gateway_usage",       // 000054 M2-b gateway metering
+	"gateway_idempotency", // 000055 M2-4 idempotency claims
 }
 
 // versionedSQLiteColumns maps each existing table to the columns that the
@@ -86,10 +88,12 @@ var versionedSQLiteColumns = map[string][]string{
 	"tenant_user_env_vars": {
 		"principal_type", "principal_id", "sandbox_config_id", "skill_id", "name", "value",
 	}, // 000028
-	"custom_agents": {"published", "published_at"}, // 000052 model-gateway publish flag
+	"custom_agents": {"published", "published_at", // 000052 model-gateway publish flag
+		"published_scope", "published_version", "published_config", "deprecation_sunset"}, // 000053 M2-a publish governance
+	"tenant_api_keys": {"agent_grants", "daily_token_budget", "daily_request_budget"}, // 000054 M2-b grants + quotas
 }
 
-const expectedSQLiteMigrationVersion = 52
+const expectedSQLiteMigrationVersion = 55
 
 func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
 	repoRoot := sqliteRepoRoot(t)

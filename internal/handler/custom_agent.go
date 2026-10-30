@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/application/service"
@@ -41,7 +42,10 @@ type CustomAgentHandler struct {
 	sandboxConfigs     sandboxConfigLookup
 	usableSkills       usableSkillLister
 	webSearchProviders interfaces.WebSearchProviderRepository
-	desktop            bool
+	// audit records gateway publish governance changes (M2-a); nil in unit
+	// tests degrades to a log line, never to a failed publish.
+	audit   interfaces.AuditLogService
+	desktop bool
 }
 
 // NewCustomAgentHandler creates a new custom agent handler instance
@@ -54,6 +58,7 @@ func NewCustomAgentHandler(
 	host service.HostSandboxManager,
 	usableSkills *service.TenantSkillService,
 	webSearchProviders interfaces.WebSearchProviderRepository,
+	audit interfaces.AuditLogService,
 ) *CustomAgentHandler {
 	return &CustomAgentHandler{
 		service:            service,
@@ -63,7 +68,58 @@ func NewCustomAgentHandler(
 		sandboxConfigs:     sandboxConfigs,
 		usableSkills:       usableSkills,
 		webSearchProviders: webSearchProviders,
+		audit:              audit,
 		desktop:            host.Desktop,
+	}
+}
+
+// auditGatewayPublishChange writes one gateway.publish / gateway.unpublish /
+// gateway.governance audit row for a publish-governance PATCH (M2-a). The
+// details summarize the effective state (scope, version, sunset) so operators
+// can reconstruct the published face over time. Audit failures never fail the
+// PATCH: the state change already committed.
+func (h *CustomAgentHandler) auditGatewayPublishChange(
+	ctx context.Context, agentID string, agent *types.CustomAgent,
+	upd types.GatewayPublishUpdate, publishedRequested bool,
+) {
+	if h.audit == nil || agent == nil {
+		return
+	}
+	action := types.AuditActionGatewayGovernance
+	switch {
+	case publishedRequested && upd.Published && agent.Published:
+		action = types.AuditActionGatewayPublish
+	case publishedRequested && !upd.Published && !agent.Published:
+		action = types.AuditActionGatewayUnpublish
+	}
+	details := types.JSONMap{
+		"agent_id":   agent.ID,
+		"agent_name": agent.Name,
+		"published":  agent.Published,
+		"scope":      agent.EffectiveGatewayScope(),
+		"version":    agent.GatewayVersion,
+	}
+	if agent.GatewaySunset != nil {
+		details["deprecation_sunset"] = agent.GatewaySunset.Format(time.RFC3339)
+	}
+	if upd.SunsetClear {
+		details["sunset_cleared"] = true
+	}
+	userID, _ := types.UserIDFromContext(ctx)
+	detailsRaw, _ := json.Marshal(details)
+	entry := &types.AuditLog{
+		TenantID:    agent.TenantID,
+		ActorUserID: userID,
+		Action:      action,
+		ScopeType:   "agent",
+		ScopeID:     agent.ID,
+		TargetType:  "gateway_model",
+		TargetID:    agent.ID,
+		Outcome:     types.AuditOutcomeSuccess,
+		Details:     types.JSON(detailsRaw),
+	}
+	if err := h.audit.Log(ctx, entry); err != nil {
+		logger.Warnf(ctx, "[agent] gateway publish audit write failed: agent=%s err=%v", agent.ID, err)
 	}
 }
 
@@ -116,11 +172,27 @@ type PatchAgentRequest struct {
 	// model gateway (/v1). Publishing rejects a name that another published
 	// agent in the workspace already uses (case-insensitive).
 	Published *bool `json:"published" extensions:"x-agent"`
+	// PublishedScope narrows who may call the published agent on the gateway
+	// (M2-a): private (creator's credentials only), org (plus tenants sharing
+	// an org the agent is published to) or tenant (whole workspace; default).
+	// Omitted keeps the stored value; a first publish defaults to tenant.
+	PublishedScope *string `json:"published_scope" enums:"private,org,tenant" extensions:"x-agent"`
+	// swaggertype string keeps the operations catalog (which only binds
+	// scalar/array shapes) working: the wire accepts an RFC3339 string or
+	// explicit null (clears the sunset), parsed by the publish update.
+	//
+	// DeprecationSunset marks the deprecated transition state: an RFC3339
+	// instant until which the published agent stays callable (responses carry
+	// X-WeKnora-Deprecation); past the instant it resolves as unpublished.
+	// JSON null clears an existing sunset. Requires the sunset to be in the
+	// future when set alongside publish.
+	DeprecationSunset json.RawMessage `json:"deprecation_sunset" swaggertype:"string" format:"date-time" extensions:"x-agent"`
 }
 
-// publishOnly reports whether `published` is the sole field in the request;
-// such a PATCH skips the config-update path (built-in agents can never go
-// through it, and a pure publish must not re-validate unrelated config).
+// publishOnly reports whether the request touches only gateway publish
+// governance (published flag, scope, sunset); such a PATCH skips the
+// config-update path (built-in agents can never go through it, and a pure
+// publish must not re-validate unrelated config).
 func (p PatchAgentRequest) publishOnly() bool {
 	return p.Name == nil && p.Description == nil && p.AgentMode == nil &&
 		p.SystemPrompt == nil && p.ModelID == nil && p.KBSelectionMode == nil &&
@@ -128,6 +200,36 @@ func (p PatchAgentRequest) publishOnly() bool {
 		p.SkillsSelectionMode == nil && p.SelectedSkills == nil &&
 		p.WebSearchEnabled == nil && p.WebSearchProviderID == nil &&
 		p.MultiTurnEnabled == nil
+}
+
+// gatewayPublishUpdate maps the PATCH fields onto the service-level publish
+// update. deprecation_sunset decodes from JSON directly so null (clear) and
+// an absent field (keep) stay distinguishable.
+func (p PatchAgentRequest) gatewayPublishUpdate() (types.GatewayPublishUpdate, error) {
+	upd := types.GatewayPublishUpdate{}
+	if p.Published != nil {
+		upd.PublishSet = true
+		upd.Published = *p.Published
+	}
+	upd.Scope = p.PublishedScope
+	if len(p.DeprecationSunset) > 0 {
+		trimmed := trimJSONSpace(p.DeprecationSunset)
+		if string(trimmed) == "null" {
+			upd.SunsetClear = true
+		} else {
+			var sunset time.Time
+			if err := json.Unmarshal(trimmed, &sunset); err != nil {
+				return upd, errors.NewBadRequestError("deprecation_sunset must be an RFC3339 timestamp or null")
+			}
+			upd.Sunset = &sunset
+		}
+	}
+	return upd, nil
+}
+
+// trimJSONSpace strips leading/trailing whitespace from a raw JSON value.
+func trimJSONSpace(raw json.RawMessage) json.RawMessage {
+	return json.RawMessage(strings.TrimSpace(string(raw)))
 }
 
 // apply overlays the request onto an agent's current state, as an update
@@ -580,14 +682,19 @@ func (h *CustomAgentHandler) PatchAgent(c *gin.Context) {
 		_ = c.Error(errors.NewBadRequestError("selection mode must be all, selected or none"))
 		return
 	}
-	// Gateway publish state is its own transaction: apply it first so a
+	// Gateway publish governance is its own transaction: apply it first so a
 	// publish-only PATCH answers directly and a combined PATCH keeps the
 	// invariant "publish exposes the last saved config". A publish conflict
 	// (409) aborts before any config change is attempted.
 	var publishedAgent *types.CustomAgent
-	if patch.Published != nil {
+	if patch.Published != nil || patch.PublishedScope != nil || len(patch.DeprecationSunset) > 0 {
+		upd, updErr := patch.gatewayPublishUpdate()
+		if updErr != nil {
+			_ = c.Error(updErr)
+			return
+		}
 		var pubErr error
-		publishedAgent, pubErr = h.service.SetAgentPublished(ctx, id, *patch.Published)
+		publishedAgent, pubErr = h.service.SetAgentPublished(ctx, id, upd)
 		if pubErr != nil {
 			logger.ErrorWithFields(ctx, pubErr, map[string]interface{}{"agent_id": id})
 			switch pubErr {
@@ -601,11 +708,18 @@ func (h *CustomAgentHandler) PatchAgent(c *gin.Context) {
 			case service.ErrAgentNameRequired:
 				_ = c.Error(errors.NewBadRequestError(
 					"Agent must have a name before it can be published"))
+			case service.ErrInvalidGatewayScope:
+				_ = c.Error(errors.NewBadRequestError(
+					"published_scope must be private, org or tenant"))
+			case service.ErrInvalidGatewaySunset:
+				_ = c.Error(errors.NewBadRequestError(
+					"deprecation_sunset must be an RFC3339 instant in the future"))
 			default:
 				_ = c.Error(errors.NewInternalServerError("Failed to update agent"))
 			}
 			return
 		}
+		h.auditGatewayPublishChange(ctx, id, publishedAgent, upd, patch.Published != nil)
 	}
 	if patch.Published != nil && patch.publishOnly() {
 		c.JSON(http.StatusOK, gin.H{"success": true, "data": publishedAgent})

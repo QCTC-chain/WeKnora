@@ -592,6 +592,7 @@ func attachAPIKeyAuthContext(
 		AuthSource: authSource,
 	}
 	if key != nil {
+		fullAccess := key.FullAccess && !key.IsPlatform()
 		session.APIKeyScope = &types.TenantAPIKeyScope{
 			KeyID:            key.ID,
 			Name:             key.Name,
@@ -599,6 +600,10 @@ func attachAPIKeyAuthContext(
 			FullAccess:       fullAccess,
 			KnowledgeBaseIDs: key.KnowledgeBaseIDs,
 			Capabilities:     key.Capabilities,
+			// M2-b gateway grants/quotas ride along for /v1 handlers.
+			AgentGrants:        key.AgentGrants,
+			DailyTokenBudget:   key.DailyTokenBudget,
+			DailyRequestBudget: key.DailyRequestBudget,
 		}
 	}
 	applyAuthSession(c, session)

@@ -152,6 +152,18 @@ func TestGatewayAuthXAPIKeyHeaderAuthenticates(t *testing.T) {
 	}
 }
 
+// TestGatewayAuthLowercaseXAPIKeyAuthenticates proves the Anthropic header
+// spelling (x-api-key) resolves through Go header canonicalization — the
+// /v1/messages shell relies on it.
+func TestGatewayAuthLowercaseXAPIKeyAuthenticates(t *testing.T) {
+	rec, _ := serveGateway(t, gatewayKey(types.APIKeyCapabilityChat), nil,
+		&types.Tenant{ID: 42, Status: "active"},
+		map[string]string{"x-api-key": "wk-secret"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGatewayAuthFullAccessKeyAllowed(t *testing.T) {
 	key := gatewayKey()
 	key.FullAccess = true

@@ -114,23 +114,37 @@ type GatewayConfig struct {
 	// PathPrefix is the mount point of the gateway surface. Default "/v1".
 	// Env override: GATEWAY_PATH_PREFIX.
 	PathPrefix string `yaml:"path_prefix" json:"path_prefix"`
+	// TenantDailyTokenBudget caps every workspace's total gateway tokens
+	// per UTC day (M2-b tenant-level total gate). 0 = unlimited. Per-key
+	// budgets live on the API key rows. Env override:
+	// GATEWAY_TENANT_DAILY_TOKEN_BUDGET.
+	TenantDailyTokenBudget int64 `yaml:"tenant_daily_token_budget" json:"tenant_daily_token_budget"`
 }
 
 // Gateway defaults (docs design/agent-model-gateway-m1.md §9/§10).
 const (
-	DefaultGatewayRequestTimeout     = 600 * time.Second
-	DefaultGatewayHeartbeatInterval  = 15 * time.Second
-	DefaultGatewayMaxConcurrency     = 3
-	DefaultGatewaySessionRetention   = 72 * time.Hour
-	DefaultGatewayThoughtMode        = "reasoning"
-	DefaultGatewayProgressMode       = "text"
-	DefaultGatewayPathPrefix         = "/v1"
-	GatewayThoughtModeReasoning      = "reasoning"
-	GatewayThoughtModeCollapse       = "collapse"
-	GatewayThoughtModeDrop           = "drop"
-	GatewayProgressModeText          = "text"
-	GatewayProgressModeDrop          = "drop"
+	DefaultGatewayRequestTimeout    = 600 * time.Second
+	DefaultGatewayHeartbeatInterval = 15 * time.Second
+	DefaultGatewayMaxConcurrency    = 3
+	DefaultGatewaySessionRetention  = 72 * time.Hour
+	DefaultGatewayThoughtMode       = "reasoning"
+	DefaultGatewayProgressMode      = "text"
+	DefaultGatewayPathPrefix        = "/v1"
+	GatewayThoughtModeReasoning     = "reasoning"
+	GatewayThoughtModeCollapse      = "collapse"
+	GatewayThoughtModeDrop          = "drop"
+	GatewayProgressModeText         = "text"
+	GatewayProgressModeDrop         = "drop"
 )
+
+// EffectiveTenantDailyTokenBudget returns the tenant-level daily total
+// token gate, nil-safe, 0 = unlimited.
+func (g *GatewayConfig) EffectiveTenantDailyTokenBudget() int64 {
+	if g == nil || g.TenantDailyTokenBudget < 0 {
+		return 0
+	}
+	return g.TenantDailyTokenBudget
+}
 
 // EffectiveRequestTimeout returns the configured turn timeout, nil-safe,
 // with the design default for unset values.
@@ -1062,6 +1076,11 @@ func applyGatewayEnvOverrides(cfg *Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("GATEWAY_PATH_PREFIX")); value != "" {
 		gateway.PathPrefix = value
+	}
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_TENANT_DAILY_TOKEN_BUDGET")); value != "" {
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil && n >= 0 {
+			gateway.TenantDailyTokenBudget = n
+		}
 	}
 }
 

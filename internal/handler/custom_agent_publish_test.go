@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service"
@@ -140,4 +141,118 @@ func TestPatchAgentPublishUnnamedAgent400(t *testing.T) {
 	repo := &publishRepo{agent: &types.CustomAgent{ID: "custom-1", Name: "  ", TenantID: 1}}
 	rec := patchPublished(t, repo, `{"published": true}`)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+// --- M2-a publish governance: scope / sunset / audit ---
+
+// recordingAudit captures audit rows written by the publish PATCH.
+type recordingAudit struct {
+	interfaces.AuditLogService
+	rows []*types.AuditLog
+}
+
+func (a *recordingAudit) Log(_ context.Context, entry *types.AuditLog) error {
+	a.rows = append(a.rows, entry)
+	return nil
+}
+
+func patchPublishedWithAudit(t *testing.T, repo *publishRepo, audit *recordingAudit, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	svc := service.NewCustomAgentService(repo, nil, nil, nil, nil, nil, nil, nil)
+	h := &CustomAgentHandler{service: svc, audit: audit}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(context.WithValue(
+			c.Request.Context(), types.TenantIDContextKey, uint64(1)))
+		c.Request = c.Request.WithContext(context.WithValue(
+			c.Request.Context(), types.UserIDContextKey, "user-1"))
+		c.Next()
+	})
+	router.Use(middleware.ErrorHandler())
+	router.PATCH("/agents/:id", h.PatchAgent)
+	req := httptest.NewRequest(http.MethodPatch, "/agents/custom-1", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func governanceBody(t *testing.T, rec *httptest.ResponseRecorder) types.CustomAgent {
+	t.Helper()
+	var body struct {
+		Data types.CustomAgent `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	return body.Data
+}
+
+func TestPatchAgentPublishGovernanceFields(t *testing.T) {
+	future := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Second)
+	repo := &publishRepo{agent: &types.CustomAgent{ID: "custom-1", Name: "Doc QA", TenantID: 1}}
+	rec := patchPublishedWithAudit(t, repo, &recordingAudit{}, `{
+		"published": true,
+		"published_scope": "private",
+		"deprecation_sunset": "`+future.Format(time.RFC3339)+`"
+	}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got := governanceBody(t, rec)
+	require.True(t, got.Published)
+	require.Equal(t, types.GatewayScopePrivate, got.GatewayScope)
+	require.EqualValues(t, 1, got.GatewayVersion)
+	require.NotNil(t, got.GatewaySnapshot, "publish must freeze a snapshot")
+	require.NotNil(t, got.GatewaySunset)
+}
+
+func TestPatchAgentPublishGovernanceInvalidScope400(t *testing.T) {
+	repo := &publishRepo{agent: &types.CustomAgent{ID: "custom-1", Name: "Doc QA", TenantID: 1}}
+	rec := patchPublishedWithAudit(t, repo, &recordingAudit{}, `{"published": true, "published_scope": "world"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+func TestPatchAgentPublishGovernanceInvalidSunset400(t *testing.T) {
+	repo := &publishRepo{agent: &types.CustomAgent{ID: "custom-1", Name: "Doc QA", TenantID: 1}}
+	rec := patchPublishedWithAudit(t, repo, &recordingAudit{},
+		`{"published": true, "deprecation_sunset": "2020-01-01T00:00:00Z"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+func TestPatchAgentPublishGovernanceSunsetNullClears(t *testing.T) {
+	future := time.Now().Add(72 * time.Hour)
+	repo := &publishRepo{agent: &types.CustomAgent{
+		ID: "custom-1", Name: "Doc QA", TenantID: 1, Published: true,
+		GatewayScope: types.GatewayScopeTenant, GatewayVersion: 3, GatewaySunset: &future,
+	}}
+	rec := patchPublishedWithAudit(t, repo, &recordingAudit{}, `{"deprecation_sunset": null}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got := governanceBody(t, rec)
+	require.Nil(t, got.GatewaySunset, "deprecation_sunset:null must clear the sunset")
+	require.EqualValues(t, 3, got.GatewayVersion, "sunset clear must not bump the version")
+}
+
+func TestPatchAgentPublishAuditActions(t *testing.T) {
+	future := time.Now().Add(72 * time.Hour)
+	audit := &recordingAudit{}
+
+	// Publish → gateway.publish
+	repo := &publishRepo{agent: &types.CustomAgent{ID: "custom-1", Name: "Doc QA", TenantID: 1}}
+	rec := patchPublishedWithAudit(t, repo, audit, `{"published": true}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, audit.rows, 1)
+	require.Equal(t, types.AuditActionGatewayPublish, audit.rows[0].Action)
+	require.Equal(t, "user-1", audit.rows[0].ActorUserID)
+
+	// Scope-only PATCH on the published agent → gateway.governance
+	rec = patchPublishedWithAudit(t, repo, audit, `{"published_scope": "org"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, audit.rows, 2)
+	require.Equal(t, types.AuditActionGatewayGovernance, audit.rows[1].Action)
+
+	// Unpublish → gateway.unpublish, version retained
+	rec = patchPublishedWithAudit(t, repo, audit, `{"published": false}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, audit.rows, 3)
+	require.Equal(t, types.AuditActionGatewayUnpublish, audit.rows[2].Action)
+	require.EqualValues(t, 1, repo.agent.GatewayVersion)
+	_ = future
 }

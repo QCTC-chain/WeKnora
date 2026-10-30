@@ -32,6 +32,11 @@ type fakeGatewaySessions struct {
 	qaRequests  []*types.QARequest
 
 	script func(bus *event.EventBus, req *types.QARequest) error
+
+	// M2-3 continuation state: thread is what FindGatewayThreadSession /
+	// GetSessionByID return; touched records TouchGatewaySession calls.
+	thread  *types.Session
+	touched []string
 }
 
 func (f *fakeGatewaySessions) CreateSession(_ context.Context, s *types.Session) (*types.Session, error) {

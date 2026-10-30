@@ -61,7 +61,7 @@ func newGatewayTestRouter(t *testing.T, key *types.TenantAPIKey) *gin.Engine {
 		ID: "agt-1", Name: "Doc QA", TenantID: 42, Published: true,
 	}}}
 	r := gin.New()
-	RegisterOpenAICompatRoutes(r, openai_compat.NewGatewayHandler(agents, nil, nil, nil, nil), fakes, fakes, fakes)
+	RegisterOpenAICompatRoutes(r, openai_compat.NewGatewayHandler(agents, nil, nil, nil, nil, nil, nil, nil), fakes, fakes, fakes)
 	return r
 }
 
@@ -128,6 +128,26 @@ func TestGatewayChatCompletionsRouteMounted(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestGatewayAnthropicMessagesRouteMounted(t *testing.T) {
+	// M2-5: POST /v1/messages exists behind the same GatewayAuth; the
+	// Anthropic header spelling (x-api-key) authenticates like X-API-Key.
+	r := newGatewayTestRouter(t, gatewayChatKey())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "route must be registered (401 without key, not 404)")
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "wk-secret")
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	require.NotEqual(t, http.StatusUnauthorized, rec.Code, "x-api-key must authenticate")
+	require.NotEqual(t, http.StatusNotFound, rec.Code)
 
 	authed := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	authed.Header.Set("Authorization", "Bearer wk-secret")

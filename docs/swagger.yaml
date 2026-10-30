@@ -1696,6 +1696,9 @@ definitions:
     - faq.import_completed
     - faq.import_failed
     - gateway.completion
+    - gateway.publish
+    - gateway.unpublish
+    - gateway.governance
     type: string
     x-enum-varnames:
     - AuditActionMemberAdded
@@ -1761,6 +1764,9 @@ definitions:
     - AuditActionFAQImportCompleted
     - AuditActionFAQImportFailed
     - AuditActionGatewayCompletion
+    - AuditActionGatewayPublish
+    - AuditActionGatewayUnpublish
+    - AuditActionGatewayGovernance
   github_com_Tencent_WeKnora_internal_types.AuditLog:
     properties:
       action:
@@ -2758,6 +2764,37 @@ definitions:
         description: Description of the agent
         type: string
         x-agent: true
+      gateway_scope:
+        description: |-
+          GatewayScope narrows WHO may call the published agent through the
+          gateway. Empty means "tenant" (the M1 default, kept for legacy rows).
+            private: only callers whose principal user is the agent creator;
+            org:     plus every tenant that shares an organization the agent is
+                     published to (the existing agent_shares system; a share only
+                     counts while both the source and caller tenants remain members);
+            tenant:  every gateway credential of the agent's workspace.
+        type: string
+      gateway_snapshot:
+        allOf:
+        - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.CustomAgentConfig'
+        description: |-
+          GatewaySnapshot is the agent config frozen at publish time. The
+          gateway resolves and executes this snapshot, so editing the live agent
+          no longer changes the published face until the next publish. Nil on
+          legacy rows (M1 published before governance) means "use the live
+          config" — publishing again under M2 freezes one.
+      gateway_sunset:
+        description: |-
+          GatewaySunset marks the "deprecated" transition state: while set and
+          in the future the agent stays callable but every gateway response
+          carries `X-WeKnora-Deprecation: sunset=<RFC3339>`; once the instant
+          passes it resolves as unpublished (lazy check — no cron needed).
+        type: string
+      gateway_version:
+        description: |-
+          GatewayVersion is the publish snapshot version: bumped on every
+          publish, exposed as /v1/models meta.version. Zero = never published.
+        type: integer
       id:
         description: |-
           Unique identifier of the agent (composite primary key with TenantID)
@@ -12460,6 +12497,20 @@ definitions:
         - smart-reasoning
         type: string
         x-agent: true
+      deprecation_sunset:
+        description: |-
+          swaggertype string keeps the operations catalog (which only binds
+          scalar/array shapes) working: the wire accepts an RFC3339 string or
+          explicit null (clears the sunset), parsed by the publish update.
+
+          DeprecationSunset marks the deprecated transition state: an RFC3339
+          instant until which the published agent stays callable (responses carry
+          X-WeKnora-Deprecation); past the instant it resolves as unpublished.
+          JSON null clears an existing sunset. Requires the sunset to be in the
+          future when set alongside publish.
+        format: date-time
+        type: string
+        x-agent: true
       description:
         description: What the agent is for
         type: string
@@ -12517,6 +12568,18 @@ definitions:
           model gateway (/v1). Publishing rejects a name that another published
           agent in the workspace already uses (case-insensitive).
         type: boolean
+        x-agent: true
+      published_scope:
+        description: |-
+          PublishedScope narrows who may call the published agent on the gateway
+          (M2-a): private (creator's credentials only), org (plus tenants sharing
+          an org the agent is published to) or tenant (whole workspace; default).
+          Omitted keeps the stored value; a first publish defaults to tenant.
+        enum:
+        - private
+        - org
+        - tenant
+        type: string
         x-agent: true
       selected_skills:
         description: |-
@@ -14159,6 +14222,10 @@ definitions:
     type: object
   internal_handler.tenantAPIKeyCreateResponse:
     properties:
+      agent_grants:
+        items:
+          type: string
+        type: array
       api_key:
         type: string
       capabilities:
@@ -14167,6 +14234,10 @@ definitions:
         type: array
       created_at:
         type: string
+      daily_request_budget:
+        type: integer
+      daily_token_budget:
+        type: integer
       expires_at:
         type: string
       full_access:
@@ -14188,6 +14259,10 @@ definitions:
     type: object
   internal_handler.tenantAPIKeyResponse:
     properties:
+      agent_grants:
+        items:
+          type: string
+        type: array
       api_key:
         type: string
       capabilities:
@@ -14196,6 +14271,10 @@ definitions:
         type: array
       created_at:
         type: string
+      daily_request_budget:
+        type: integer
+      daily_token_budget:
+        type: integer
       expires_at:
         type: string
       full_access:
@@ -14260,6 +14339,41 @@ definitions:
         minLength: 1
         type: string
         x-agent: true
+    type: object
+  internal_handler_openai_compat.AnthropicMessagesRequest:
+    properties:
+      max_tokens:
+        description: required by Anthropic; the agent owns the budget
+        type: integer
+      messages:
+        items:
+          properties:
+            content:
+              type: object
+            role:
+              description: user | assistant
+              type: string
+          type: object
+        type: array
+      metadata:
+        properties:
+          user_id:
+            description: Anthropic's external user id; feeds the M2-3 derived thread
+              key.
+            type: string
+        type: object
+      model:
+        type: string
+      stream:
+        type: boolean
+      system:
+        description: string | [{type:"text",text}]
+        type: object
+      tools:
+        description: 'M2: counted as ignored, never executed'
+        items:
+          type: object
+        type: array
     type: object
   internal_handler_openai_compat.ChatCompletionChoice:
     properties:
@@ -14491,19 +14605,39 @@ definitions:
   internal_handler_openai_compat.ModelMeta:
     properties:
       agent_mode:
-        description: AgentMode is quick-answer or smart-reasoning.
+        description: |-
+          AgentMode is quick-answer or smart-reasoning (from the publish
+          snapshot when one exists).
         type: string
       agent_name:
         description: |-
           AgentName is the human-readable agent name (also usable as a model
           alias on completions).
         type: string
+      deprecated:
+        description: |-
+          Deprecated marks the deprecation transition (M2-a): the model is
+          callable but scheduled for removal; pair with sunset_at.
+        type: boolean
       description:
         description: Description is the agent's description, trimmed for list payloads.
         type: string
       is_builtin:
         description: IsBuiltin marks workspace built-in agents.
         type: boolean
+      scope:
+        description: 'Scope is the published_scope: private | org | tenant (M2-a).'
+        type: string
+      sunset_at:
+        description: |-
+          SunsetAt is the RFC3339 instant after which the model resolves as
+          unpublished (M2-a deprecation sunset).
+        type: string
+      version:
+        description: |-
+          Version is the publish snapshot version (M2-a): bumped on every
+          publish; the value /v1/chat/completions executes.
+        type: integer
     type: object
   internal_handler_openai_compat.RespMessage:
     properties:
@@ -29793,6 +29927,72 @@ paths:
       summary: 网关对话补全
       tags:
       - 模型网关
+  /v1/messages:
+    post:
+      consumes:
+      - application/json
+      description: 以 Anthropic Messages 协议调用已发布的智能体(system/messages/content blocks,SSE
+        事件流)
+      parameters:
+      - description: Anthropic Messages 请求
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handler_openai_compat.AnthropicMessagesRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: message 对象或 SSE 事件流
+          headers:
+            X-WeKnora-Agent-Id:
+              type: string
+            X-WeKnora-Session-Id:
+              type: string
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: invalid_request_error
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: authentication_error
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: not_found_error
+          schema:
+            additionalProperties: true
+            type: object
+        "429":
+          description: rate_limit_error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - ApiKeyAuth: []
+      summary: Anthropic 兼容对话
+      tags:
+      - 网关(Anthropic 兼容)
+  /v1/metrics:
+    get:
+      description: Prometheus 文本格式的网关运行指标(请求计数、TTFB、内部轮数、token 放大比、翻译丢弃量、429/404 计数)
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: Prometheus exposition
+          schema:
+            type: string
+      security:
+      - ApiKeyAuth: []
+      summary: 网关指标
+      tags:
+      - 网关(可观测性)
   /v1/models:
     get:
       description: |-

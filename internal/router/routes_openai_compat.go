@@ -33,6 +33,14 @@ func RegisterOpenAICompatRoutes(
 	}
 	auth := middleware.GatewayAuth(tenantService, userService, apiKeyService)
 	grp := r.Group(GatewayV1BasePath, auth)
+	// M2-6: request/outcome metrics for the whole gateway group, then the
+	// routes (metrics endpoint itself excluded from the counter to avoid
+	// self-amplification).
+	grp.Use(openai_compat.GatewayMetricsMiddleware)
+	grp.GET("/metrics", gateway.GatewayMetrics)
 	grp.GET("/models", gateway.ListModels)
 	grp.POST("/chat/completions", gateway.ChatCompletions)
+	// M2-5: Anthropic Messages shell over the same pipeline (x-api-key or
+	// Bearer auth via the same GatewayAuth middleware).
+	grp.POST("/messages", gateway.AnthropicMessages)
 }

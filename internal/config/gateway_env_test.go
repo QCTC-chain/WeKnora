@@ -11,10 +11,10 @@ import (
 // other non-empty value disables the surface.
 func TestApplyGatewayEnvOverrides(t *testing.T) {
 	cases := []struct {
-		name  string
-		env   string // value for GATEWAY_ENABLED (empty == unset)
-		yaml  bool   // pre-set gateway.enabled
-		want  bool
+		name string
+		env  string // value for GATEWAY_ENABLED (empty == unset)
+		yaml bool   // pre-set gateway.enabled
+		want bool
 	}{
 		{"unset keeps YAML false", "", false, false},
 		{"unset keeps YAML true", "", true, true},

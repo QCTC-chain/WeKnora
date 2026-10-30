@@ -1,9 +1,11 @@
 package openai_compat
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -60,6 +62,18 @@ var ignoredSamplingParams = []string{"temperature", "top_p", "max_tokens", "reas
 // @Security     ApiKeyAuth
 // @Router       /v1/chat/completions [post]
 func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
+	h.handleCompletions(c, protoOpenAI)
+}
+
+// protoOpenAI discriminates the OpenAI shell in the shared handler.
+const protoOpenAI = "openai"
+
+// handleCompletions is the shared completion pipeline for both protocol
+// shells (M1 OpenAI /v1/chat/completions, M2-5 Anthropic /v1/messages):
+// identical resolution, grants, budgets, idempotency, threading, turn
+// execution, audit and metering; only request parsing and response/error
+// encoding differ.
+func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 	started := time.Now()
 	ctx := c.Request.Context()
 	tenantID, ok := types.TenantIDFromContext(ctx)
@@ -69,30 +83,55 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	var req ChatCompletionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeErrorParam(c, http.StatusBadRequest, "", "body", "Invalid request body: "+err.Error())
+	// M2-4: keep the raw body for the idempotency fingerprint, then restore
+	// it for the bind (ShouldBindJSON consumes the reader).
+	rawBody, readErr := io.ReadAll(c.Request.Body)
+	if readErr != nil {
+		writeErrorParam(c, http.StatusBadRequest, "", "body", "Failed to read request body: "+readErr.Error())
+		return
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(rawBody))
+
+	req, parseErr := parseCompletionsRequest(rawBody, proto)
+	if parseErr != nil {
+		writeProtoParam(c, proto, http.StatusBadRequest, "body", "Invalid request body: "+parseErr.Error())
 		return
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		writeErrorParam(c, http.StatusBadRequest, "", "model", "model is required")
+		writeProtoParam(c, proto, http.StatusBadRequest, "model", "model is required")
 		return
 	}
 	if len(req.Messages) == 0 {
-		writeErrorParam(c, http.StatusBadRequest, "", "messages", "messages must not be empty")
+		writeProtoParam(c, proto, http.StatusBadRequest, "messages", "messages must not be empty")
 		return
 	}
 
 	agent, ok := h.resolveAgent(ctx, tenantID, req.Model)
 	if !ok {
-		writeError(c, http.StatusNotFound, "model_not_found",
+		writeProtoError(c, proto, http.StatusNotFound, "model_not_found",
 			"The model '"+req.Model+"' does not exist or is not published in this workspace")
+		gatewayMetrics.observeModelNotFound(req.Model)
+		return
+	}
+	// M2-b per-key grants: a restricted key may only call its listed agents
+	// (404, same as unpublished — the whitelist is not worth leaking).
+	if !agentGranted(ctx, agent.ID) {
+		writeProtoError(c, proto, http.StatusNotFound, "model_not_found",
+			"The model '"+req.Model+"' is not granted to this API key")
+		gatewayMetrics.observeModelNotFound(req.Model)
+		return
+	}
+
+	// M2-b budgets: entry-time probe against key + tenant daily budgets.
+	if decision := h.checkGatewayBudget(ctx, tenantID); !decision.ok {
+		gatewayMetrics.observeBudgetExceeded(decision.limit)
+		writeProtoError(c, proto, http.StatusTooManyRequests, "budget_exceeded", decision.reason+" ("+budgetResetHint()+")")
 		return
 	}
 
 	turn, err := renderMessages(req.Messages, agent.Config.ImageUploadEnabled)
 	if err != nil {
-		writeErrorParam(c, http.StatusBadRequest, "", "messages", err.Error())
+		writeProtoParam(c, proto, http.StatusBadRequest, "messages", err.Error())
 		return
 	}
 
@@ -100,17 +139,72 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	// immediately, before any session or message rows are created.
 	release, ok := h.acquireTurnSlot(ctx, tenantID)
 	if !ok {
-		writeError(c, http.StatusTooManyRequests, "concurrency_limit",
+		gatewayMetrics.observeConcurrencyLimited()
+		writeProtoError(c, proto, http.StatusTooManyRequests, "concurrency_limit",
 			"Too many concurrent requests for this API key; retry after the running requests finish")
 		return
 	}
 	defer release()
 
-	session, err := h.createGatewaySession(ctx, tenantID, req.Model)
-	if err != nil {
-		logger.ErrorWithFields(ctx, err, map[string]interface{}{"tenant_id": tenantID})
-		writeError(c, http.StatusInternalServerError, "internal_error", "Failed to create gateway session")
+	// M2-3 session continuation: explicit header wins, then the
+	// (owner|key, agent) derived thread; miss falls back to a fresh session.
+	thread, ok := h.resolveGatewayThread(ctx, c, tenantID, agent)
+	if !ok {
+		writeProtoError(c, proto, http.StatusNotFound, "session_not_found",
+			"The session referenced by "+SessionIDHeader+" does not exist in this workspace, is not a gateway session, or belongs to another agent")
 		return
+	}
+	// M2-4 idempotency: claim AFTER thread 404/409 exits (those must not be
+	// replayed) and BEFORE session creation/execution. From here the
+	// response is captured for replay.
+	claim, replay, handled := h.claimIdempotency(ctx, c, tenantID, rawBody)
+	if handled || replay {
+		return
+	}
+	var capture *capturingResponseWriter
+	if claim != nil {
+		capture = &capturingResponseWriter{ResponseWriter: c.Writer}
+		c.Writer = capture
+		defer h.finishIdempotency(ctx, claim, capture)
+	}
+
+	var session *types.Session
+	if thread.session != nil {
+		session = thread.session
+		// Design §3 conflict handling: one live run per session; concurrent
+		// sends answer 409 immediately.
+		if !h.turnLocks.tryAcquire(session.ID) {
+			c.Header("Retry-After", "5")
+			writeProtoError(c, proto, http.StatusConflict, "session_busy",
+				"A turn is already running in session "+session.ID+"; retry after it finishes, change the user field, or send "+SessionIDHeader+": new")
+			return
+		}
+		defer h.turnLocks.release(session.ID)
+	} else {
+		created, err := h.createGatewaySession(ctx, tenantID, agent, req.Model)
+		if err != nil {
+			logger.ErrorWithFields(ctx, err, map[string]interface{}{"tenant_id": tenantID})
+			h.releaseIdempotency(ctx, claim)
+			claim = nil
+			writeProtoError(c, proto, http.StatusInternalServerError, "internal_error", "Failed to create gateway session")
+			return
+		}
+		session = created
+	}
+
+	// Continued threads only send the newest user message; WeKnora session
+	// history supplies the rest (design §3 continuation semantics).
+	if thread.continued {
+		lastUser := lastUserMessageIndex(req.Messages)
+		if lastUser >= 0 {
+			if trimmed, err := renderMessages(req.Messages[lastUser:], agent.Config.ImageUploadEnabled); err == nil {
+				turn = trimmed
+			}
+		}
+		// Sliding retention: a continued thread stays alive.
+		if err := h.sessions.TouchGatewaySession(ctx, session.ID); err != nil {
+			logger.Warnf(ctx, "[gateway] touch gateway session failed: session=%s err=%v", session.ID, err)
+		}
 	}
 
 	meta := &CompletionMeta{
@@ -124,38 +218,54 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 
 	auditBase := gatewayTurnAudit{
-		TenantID: tenantID,
-		UserID:   session.UserID,
-		KeyID:    gatewayKeyID(ctx),
-		KeyName:  gatewayKeyName(ctx),
-		AgentID:  agent.ID,
-		Model:    req.Model,
-		Stream:   req.Stream,
-		Query:    turn.Query,
-		Warnings: meta.Warnings,
+		TenantID:   tenantID,
+		UserID:     session.UserID,
+		KeyID:      gatewayKeyID(ctx),
+		KeyName:    gatewayKeyName(ctx),
+		AgentID:    agent.ID,
+		Model:      req.Model,
+		Stream:     req.Stream,
+		Query:      turn.Query,
+		Warnings:   meta.Warnings,
+		SessionID:  session.ID,
+		StatusCode: http.StatusOK,
 	}
 
 	c.Header("X-WeKnora-Agent-Id", agent.ID)
 	c.Header("X-WeKnora-Session-Id", session.ID)
 	c.Header("X-WeKnora-Gateway-Version", GatewayVersion)
+	if agent.GatewayDeprecated(time.Now()) {
+		// M2-a deprecated transition: keep serving, but tell clients the
+		// model is scheduled for removal (same idea as RFC 8594 Sunshine).
+		c.Header("X-WeKnora-Deprecation", "sunset="+agent.GatewaySunset.UTC().Format(time.RFC3339))
+	}
 
 	if req.Stream {
-		stream := newSSEStream(c, req.Model)
+		stream := protoStream(c, proto, req.Model)
 		stream.setHeaders(agent.ID, session.ID)
-		endReason, usage := h.runGatewayTurnStream(ctx, session, agent, turn, stream)
+		endReason, usage, telemetry := h.runGatewayTurnStream(ctx, session, agent, turn, stream)
 		auditBase.EndReason = endReason
 		auditBase.Usage = usage
+		auditBase.Telemetry = telemetry
 		auditBase.Duration = time.Since(started)
+		observeTurnMetrics(proto, usage, telemetry, started)
+		switch endReason {
+		case "timeout", "disconnect":
+			auditBase.StatusCode = http.StatusRequestTimeout
+		}
 		h.auditGatewayTurn(ctx, auditBase)
 		return
 	}
 
 	outcome := h.runGatewayTurn(ctx, session, agent, turn)
+	auditBase.Telemetry = outcome.telemetry
 	if outcome.err != nil {
 		auditBase.EndReason = "error"
+		auditBase.StatusCode = http.StatusInternalServerError
 		auditBase.Duration = time.Since(started)
+		observeTurnMetrics(proto, nil, outcome.telemetry, started)
 		h.auditGatewayTurn(ctx, auditBase)
-		writeError(c, http.StatusInternalServerError, "internal_error",
+		writeProtoError(c, proto, http.StatusInternalServerError, "internal_error",
 			"Agent run failed: "+outcome.err.Error())
 		return
 	}
@@ -166,8 +276,13 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	auditBase.EndReason = timeoutEndReason(outcome.timedOut)
 	auditBase.Usage = outcome.usage
 	auditBase.Duration = time.Since(started)
+	observeTurnMetrics(proto, outcome.usage, outcome.telemetry, started)
 	h.auditGatewayTurn(ctx, auditBase)
 
+	if proto == protoAnthropic {
+		respondAnthropicMessage(c, req.Model, outcome.content, outcome.usage)
+		return
+	}
 	c.JSON(http.StatusOK, ChatCompletionResponse{
 		ID:      "chatcmpl-" + uuid.New().String(),
 		Object:  "chat.completion",
@@ -225,10 +340,11 @@ func gatewayKeyName(ctx context.Context) string {
 
 // turnOutcome aggregates one gateway run for the non-stream response.
 type turnOutcome struct {
-	content  string
-	usage    *Usage
-	err      error
-	timedOut bool
+	content   string
+	usage     *Usage
+	err       error
+	timedOut  bool
+	telemetry *turnTelemetry
 }
 
 // runGatewayTurn creates the message rows, drives SessionService.AgentQA to
@@ -245,17 +361,18 @@ func (h *GatewayHandler) runGatewayTurn(
 	}
 
 	var (
-		mu         sync.Mutex
-		answer     strings.Builder
-		refs       []*types.SearchResult
+		mu          sync.Mutex
+		answer      strings.Builder
+		refs        []*types.SearchResult
 		finalAnswer string
-		usage      *Usage
-		qaErr      error
-		promptNote string
-		done       = make(chan struct{})
-		complete   = make(chan struct{})
-		doneOnce   sync.Once
-		compOnce   sync.Once
+		usage       *Usage
+		qaErr       error
+		promptNote  string
+		rounds      int
+		done        = make(chan struct{})
+		complete    = make(chan struct{})
+		doneOnce    sync.Once
+		compOnce    sync.Once
 	)
 	closeDone := func() { doneOnce.Do(func() { close(done) }) }
 	closeComplete := func() { compOnce.Do(func() { close(complete) }) }
@@ -303,6 +420,7 @@ func (h *GatewayHandler) runGatewayTurn(
 				TotalTokens:      int64(tu.TotalTokens),
 			}
 		}
+		rounds = data.TotalSteps
 		closeComplete()
 		mu.Unlock()
 		return nil
@@ -391,13 +509,15 @@ func (h *GatewayHandler) runGatewayTurn(
 		// Best effort partial answer before giving up (docs §9).
 		if strings.TrimSpace(text) != "" {
 			text += "\n[网关] 响应超时,以上为已产生的部分内容。"
-			return turnOutcome{content: text, usage: usage, timedOut: true}
+			return turnOutcome{content: text, usage: usage, timedOut: true,
+				telemetry: &turnTelemetry{Rounds: rounds, AnswerRunes: len([]rune(text))}}
 		}
-		return turnOutcome{err: errors.New("gateway request timeout")}
+		return turnOutcome{err: errors.New("gateway request timeout"),
+			telemetry: &turnTelemetry{Rounds: rounds}}
 	}
 	if strings.TrimSpace(text) == "" && runErr != nil {
 		finalizeGatewayMessage(ctx, h.messages, assistantMsg, "The answer failed: "+runErr.Error(), nil)
-		return turnOutcome{err: runErr}
+		return turnOutcome{err: runErr, telemetry: &turnTelemetry{Rounds: rounds}}
 	}
 	if strings.TrimSpace(text) == "" {
 		text = "No answer could be produced for this question."
@@ -414,7 +534,8 @@ func (h *GatewayHandler) runGatewayTurn(
 
 	content := text
 	finalizeGatewayMessage(ctx, h.messages, assistantMsg, content, collected)
-	return turnOutcome{content: content, usage: usage}
+	return turnOutcome{content: content, usage: usage, telemetry: &turnTelemetry{
+		Rounds: rounds, AnswerRunes: len([]rune(content))}}
 }
 
 // askCompleteWait is the grace window between the answer completing and the
@@ -499,10 +620,10 @@ func (h *GatewayHandler) launchAgentQA(
 }
 
 // createGatewaySession creates the one-shot audit session. Kind="gateway"
-// keeps it out of ordinary chat listings (repository filters kind='') and
+// keeps it out of ordinary chat listings (repository filters kind=”) and
 // gives the retention task a marker to delete by (G4).
 func (h *GatewayHandler) createGatewaySession(
-	ctx context.Context, tenantID uint64, model string,
+	ctx context.Context, tenantID uint64, agent *types.CustomAgent, model string,
 ) (*types.Session, error) {
 	title := "gateway:" + model
 	if runes := []rune(title); len(runes) > gatewaySessionTitleMaxRunes {
@@ -513,6 +634,9 @@ func (h *GatewayHandler) createGatewaySession(
 		Kind:        types.SessionKindGateway,
 		Title:       title,
 		Description: "OpenAI-compatible gateway turn; model=" + model,
+		// M2-3: pins the agent so thread lookups (continuation) and explicit
+		// header continues can verify the session belongs to this agent.
+		LastRequestState: &types.SessionLastRequestState{AgentID: agent.ID, AgentEnabled: true},
 	})
 	if err != nil {
 		return nil, err

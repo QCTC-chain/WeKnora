@@ -1,6 +1,6 @@
 # 智能体模型网关 M2/M3:发布治理、会话语义与工具透传
 
-状态:规划(依赖 M1 落地)　关联:`docs/design/agent-model-gateway-m1.md`、`docs/design/agent-hitl-suspend-resume.md`、`docs/design/agent-permission-model.md`
+状态:M2 全部已实现(M1 已落地)　关联:`docs/design/agent-model-gateway-m1.md`、`docs/design/agent-hitl-suspend-resume.md`、`docs/design/agent-permission-model.md`
 
 ## 0. 路线图总览
 
@@ -70,10 +70,25 @@ Claude Code、pi 等对 Anthropic Messages API 支持更原生(尤其 thinking �
 
 M2 阶段 `/v1/messages` 同样不回 `tool_use` 块(M3 补)。工作量:约 1 周(协议壳 + 兼容测试:Claude Code、pi anthropic 协议)。
 
+**实现记录(已落地)**:
+
+- 共享管线:`ChatCompletions`/`AnthropicMessages` 是同一 `handleCompletions(c, proto)` 的薄壳(`internal/handler/openai_compat/completions.go`)——鉴权、授权、配额、幂等、会话续接、并发、审计、计量全部复用,仅请求解析与响应编码按协议分派。
+- 流抽象:`turnStream` 接口(`stream.go`)把翻译器与共享轮执行器和协议解耦;`sseStream` 实现 OpenAI 块语法,`anthropicStream`(`anthropic.go`)实现 Anthropic SSE 语法(`message_start` → 懒打开的 `thinking`/`text` content block → `message_delta(stop_reason:"end_turn")` → `message_stop`;内容前心跳为 `: keep-alive` 注释帧)。
+- 请求映射:顶层 `system`(字符串或块数组)→ system 消息;`text`/`image` 块 → 内部 content parts(base64 → data URL);`tool_use` → assistant 消息上的 `ClientToolCalls`(M1 文本化),`tool_result` → `tool` 角色消息(渲染器按 id 回填工具名);`tools` 计入 `ClientToolsIgnored` 不执行;`metadata.user_id` 参与 M2-c 派生会话身份。
+- 错误壳:OpenAI 沿用原 envelope;Anthropic 用 `{"type":"error","error":{"type":...}}`(状态映射 invalid/authentication/permission/not_found/rate_limit/api_error)。
+- 鉴权:GatewayAuth 的 `X-API-Key` 经 Go 头规范化天然接受 `x-api-key`(测试覆盖)。
+- 非流式:返回 Anthropic `message` 对象(content 单 text 块,`stop_reason:"end_turn"`,usage 含 input/output tokens)。
+
 ## 6. M2-6 可观测性
 
 - 指标:TTFB、每请求内部 LLM 轮数、token 放大比、事件翻译丢弃量、429/404 计数,按 key/agent 维度出 Prometheus 指标(接入现有 tracing/langfuse 设施,`internal/agent/observe.go` 已有观测钩子)。
 - 排障:开启 `gateway.audit_payload` 时按请求留存渲染后的 query 与事件流水(采样),管理端可查。
+
+**实现记录(已落地)**:
+- 指标面:`internal/handler/openai_compat/metrics.go` 内置 Prometheus 文本 exposition 注册表(client_golang 为 indirect 依赖,不可直接 import)。暴露 `GET /v1/metrics`(Bearer/X-API-Key 鉴权,同网关组):`gateway_requests_total{protocol,outcome}`、`gateway_model_not_found_total{agent}`、`gateway_budget_exceeded_total{limit: key_requests|key_tokens|tenant_tokens}`、`gateway_concurrency_limited_total`、`gateway_translation_dropped_total{kind: thought_dropped|progress_dropped|tool_events_merged}`、`gateway_tokens_total{direction}`、`gateway_ttfb_seconds{protocol,agent}`、`gateway_turn_duration_seconds{protocol}`、`gateway_internal_rounds{protocol}`、`gateway_token_amplification_ratio{protocol}`(总量 token ÷ 可见答案 token,按 4 rune≈1 token 估算)。
+- 采集点:网关组中间件统计请求/结果;translator(`stream.go`)记录 TTFB(两种协议)、事件丢弃/合并计数与采样事件流水;轮结束统一记录时长、token、内部轮数、放大比;429 budget/concurrency 与 404 model_not_found 在各自拒绝点计数。
+- 排障流水:`gateway.audit_payload=true` 时审计 details 附带 `query`(渲染后问题,2000 rune 截断)与 `event_log`(≤40 条采样事件,含 `t_ms`/`event`/`note`,丢弃条目计入 `event_drops`);`internal_rounds` 无条件入审计。
+- 运维口径:`deprecation_sunset` 的 swagger 声明改为 string(operations 目录只绑定标量/数组形状,`swaggertype:"string"`,线协议仍接受 RFC3339 字符串或显式 null)。
 
 ---
 
@@ -135,15 +150,15 @@ sequenceDiagram
 
 ## 9. 里程碑与顺序
 
-| 顺序 | 内容 | 依赖 |
-|---|---|---|
-| M2-a | 发布治理(§1) | 无 |
-| M2-b | per-key 授权 + 计量配额(§2) | 无 |
-| M2-c | 会话续接(§3) | 无(建议在 M2-b 后,便于计量归属) |
-| M2-d | 幂等(§4) | 无 |
-| M2-e | Anthropic 端点(§5) | 无 |
-| M2-f | 可观测性(§6) | §2 |
-| M3 | 工具透传(§7-§8) | §1(发布快照)、§3(会话续接) |
+| 顺序 | 内容 | 依赖 | 状态 |
+|---|---|---|---|
+| M2-a | 发布治理(§1) | 无 | ✅ 已实现(migration 000136/000053) |
+| M2-b | per-key 授权 + 计量配额(§2) | 无 | ✅ 已实现(migration 000137/000054) |
+| M2-c | 会话续接(§3) | 无(建议在 M2-b 后,便于计量归属) | ✅ 已实现 |
+| M2-d | 幂等(§4) | 无 | ✅ 已实现(migration 000138/000055) |
+| M2-e | Anthropic 端点(§5) | 无 | ✅ 已实现 |
+| M2-f | 可观测性(§6) | §2 | ✅ 已实现 |
+| M3 | 工具透传(§7-§8) | §1(发布快照)、§3(会话续接) | 规划 |
 
 M2 总量约 5~6 周(可并行拆分);M3 约 3~4 周 + 灰度期。
 

@@ -117,6 +117,9 @@ func gatewayAPIKey(c *gin.Context) string {
 	if token, ok := bearerToken(c); ok && strings.TrimSpace(token) != "" {
 		return strings.TrimSpace(token)
 	}
+	// X-API-Key is the gateway's own header; x-api-key is the Anthropic
+	// Messages convention (M2-5, /v1/messages). Canonical Go header lookup
+	// makes both forms equivalent.
 	return strings.TrimSpace(c.GetHeader("X-API-Key"))
 }
 

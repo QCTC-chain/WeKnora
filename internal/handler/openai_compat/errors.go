@@ -10,7 +10,7 @@ import (
 // jsonUnmarshal / jsonMarshal indirections keep the type file free of extra
 // imports.
 func jsonUnmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
-func jsonMarshal(v any) ([]byte, error)     { return json.Marshal(v) }
+func jsonMarshal(v any) ([]byte, error)      { return json.Marshal(v) }
 
 func trimSpaceBytes(b []byte) []byte {
 	start, end := 0, len(b)
