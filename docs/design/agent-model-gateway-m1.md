@@ -1,6 +1,6 @@
 # 智能体模型网关(Agent-as-Model)M1:OpenAI 兼容端点
 
-状态:已实现(M1 全部里程碑 G1–G5 已落地)　关联:`docs/design/agent-hitl-suspend-resume.md`(M3 依赖)、`docs/design/agent-permission-model.md`、`internal/router/routes_mcp_endpoint.go`(公开集成面先例)
+状态:M1(G1–G5)已实现,自动化测试全绿;测试计划与执行指引见 `agent-model-gateway-m1-test.md`。　关联:`docs/design/agent-hitl-suspend-resume.md`(M3 依赖)、`docs/design/agent-permission-model.md`、`internal/router/routes_mcp_endpoint.go`(公开集成面先例)
 
 ## 0. 摘要
 
