@@ -826,7 +826,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "只修改请求中出现的字段，其余配置保持不变。\n支持名称、描述、运行模式、系统提示词、对话模型、知识库、MCP、技能范围、联网搜索、多轮对话。\nagent_mode 取 quick-answer 或 smart-reasoning。MCP 与技能只在 smart-reasoning 下运行，切到该模式会打开多轮对话。\n传 knowledge_bases、mcp_services 或 selected_skills 而不传对应模式时，切换为 selected。\n技能模式 all/none 清空技能列表；启用技能须先在编辑器选择沙箱，selected 名称须可用，否则返回 400。",
+                "description": "只修改请求中出现的字段，其余配置保持不变。\n支持名称、描述、运行模式、系统提示词、对话模型、知识库、MCP、技能范围、联网搜索、多轮对话、发布开关。\nagent_mode 取 quick-answer 或 smart-reasoning。MCP 与技能只在 smart-reasoning 下运行，切到该模式会打开多轮对话。\n传 knowledge_bases、mcp_services 或 selected_skills 而不传对应模式时，切换为 selected。\n技能模式 all/none 清空技能列表；启用技能须先在编辑器选择沙箱，selected 名称须可用，否则返回 400。\npublished=true 将智能体发布到 OpenAI 兼容模型网关(/v1/models);发布要求智能体名称在已发布集合内唯一(忽略大小写)，冲突返回 409。",
                 "consumes": [
                     "application/json"
                 ],
@@ -8620,6 +8620,67 @@
                     "target": "knowledge_base.get"
                 },
                 "x-agent-hint": "Regenerates the AI summary of what the knowledge base covers, with one model call. A description the user wrote is kept."
+            }
+        },
+        "/knowledge-bases/{id}/rebuild-index": {
+            "post": {
+                "security": [
+                    {
+                        "Bearer": []
+                    },
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "索引策略变更后，把知识库下全部文档提交重新解析。前端知识库设置弹窗\n(KnowledgeBaseEditorModal) 在保存新策略后调用此接口，此前该路由在后端缺失，调用返回 404。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "知识管理"
+                ],
+                "summary": "重建整个知识库的索引",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "知识库ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "任务已提交",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler.DataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "请求参数错误",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError"
+                        }
+                    },
+                    "403": {
+                        "description": "权限不足",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError"
+                        }
+                    },
+                    "404": {
+                        "description": "知识库不存在",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError"
+                        }
+                    },
+                    "409": {
+                        "description": "有文档正在迁移中",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError"
+                        }
+                    }
+                }
             }
         },
         "/knowledge-bases/{id}/shares": {
@@ -21764,7 +21825,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "获取空间级别的KV配置（支持web-search-config、prompt-templates、parser-engine-config、storage-engine-config、chat-history-config、retrieval-config）",
+                "description": "获取空间级别的KV配置。支持 web-search-config、prompt-templates、parser-engine-config、\nstorage-engine-config、chat-history-config、retrieval-config、memory-config、\nassistant-config、default-settings。",
                 "consumes": [
                     "application/json"
                 ],
@@ -21809,7 +21870,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "更新空间级别的KV配置（支持web-search-config、parser-engine-config、storage-engine-config、chat-history-config、retrieval-config）",
+                "description": "更新空间级别的KV配置。支持 web-search-config、parser-engine-config、storage-engine-config、\nchat-history-config、retrieval-config、memory-config、assistant-config、default-settings。",
                 "consumes": [
                     "application/json"
                 ],
@@ -22901,6 +22962,43 @@
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/internal_handler.SuccessResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/models": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "OpenAI 兼容端点:列出当前空间已发布(可通过网关调用)的智能体。\n每个智能体呈现为一个 model,id 为智能体 UUID;meta.agent_name\n同时可作为 chat/completions 的 model 别名。\n鉴权使用 WeKnora API key(Authorization: Bearer 或 X-API-Key,需要 chat 能力位)。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "模型网关"
+                ],
+                "summary": "网关模型列表",
+                "responses": {
+                    "200": {
+                        "description": "模型列表",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ModelListResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "缺少或无效 API key",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "API key 缺少 chat 能力位",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ErrorEnvelope"
                         }
                     }
                 }
@@ -25124,6 +25222,13 @@
                         "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_handler_dto.CredentialFieldMetadata"
                     }
                 },
+                "default_for": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "x-agent": true
+                },
                 "description": {
                     "type": "string",
                     "x-agent": true
@@ -25916,6 +26021,13 @@
         "github_com_Tencent_WeKnora_internal_types.AgentStep": {
             "type": "object",
             "properties": {
+                "approvals": {
+                    "description": "Approvals is the user decision for tools in this step. It is stored with\nthe step so a reloaded transcript can show what was allowed or refused.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_types.ToolApprovalRecord"
+                    }
+                },
                 "background_injections": {
                     "description": "BackgroundInjections are background-work messages delivered before this\nmodel response, after the step's steered messages, in delivery order.",
                     "type": "array",
@@ -27656,6 +27768,14 @@
                     "type": "string",
                     "x-agent": true
                 },
+                "published": {
+                    "description": "Published marks the agent as callable through the OpenAI-compatible\nmodel gateway (GET /v1/models, POST /v1/chat/completions). Default\nfalse: an agent only becomes an externally selectable \"model\" after an\nexplicit publish. Unpublishing removes it from /v1/models immediately;\nin-flight gateway requests already past resolution are not affected.",
+                    "type": "boolean"
+                },
+                "published_at": {
+                    "description": "PublishedAt records the last publish instant; cleared on unpublish.",
+                    "type": "string"
+                },
                 "tenant_id": {
                     "description": "Tenant ID (composite primary key with ID)",
                     "type": "integer"
@@ -28076,6 +28196,35 @@
                 },
                 "updated_at": {
                     "description": "Last update timestamp",
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_Tencent_WeKnora_internal_types.DefaultSettings": {
+            "type": "object",
+            "properties": {
+                "asr_model_id": {
+                    "description": "ASRModelID is the default ASR model.",
+                    "type": "string"
+                },
+                "chat_model_id": {
+                    "description": "ChatModelID is the default KnowledgeQA model.",
+                    "type": "string"
+                },
+                "embedding_model_id": {
+                    "description": "EmbeddingModelID is the default Embedding model.",
+                    "type": "string"
+                },
+                "rerank_model_id": {
+                    "description": "RerankModelID is the default Rerank model.",
+                    "type": "string"
+                },
+                "utility_model_id": {
+                    "description": "UtilityModelID is the KnowledgeQA model for short generation tasks\nsuch as writing MCP usage instructions. Empty follows the chat default.",
+                    "type": "string"
+                },
+                "vlm_model_id": {
+                    "description": "VLMModelID is the default VLLM or vision-capable KnowledgeQA model.",
                     "type": "string"
                 }
             }
@@ -29259,6 +29408,41 @@
                 "query": {
                     "description": "User query text",
                     "type": "string"
+                }
+            }
+        },
+        "github_com_Tencent_WeKnora_internal_types.HostApprovalSnapshot": {
+            "type": "object",
+            "properties": {
+                "allow_session": {
+                    "type": "boolean"
+                },
+                "command": {
+                    "type": "string"
+                },
+                "cwd": {
+                    "type": "string"
+                },
+                "denial_snippet": {
+                    "type": "string"
+                },
+                "first_attempt_ran": {
+                    "type": "boolean"
+                },
+                "grant_access": {
+                    "type": "string"
+                },
+                "grant_path": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "session_rules": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -35128,6 +35312,14 @@
                         }
                     ]
                 },
+                "default_settings": {
+                    "description": "Default settings: the workspace's default model for each type and purpose",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_types.DefaultSettings"
+                        }
+                    ]
+                },
                 "default_storage_backend_id": {
                     "description": "DefaultStorageBackendID is the workspace default concrete storage instance.",
                     "type": "string"
@@ -35502,6 +35694,59 @@
                 },
                 "total_tokens": {
                     "type": "integer"
+                }
+            }
+        },
+        "github_com_Tencent_WeKnora_internal_types.ToolApprovalRecord": {
+            "type": "object",
+            "properties": {
+                "approved": {
+                    "type": "boolean"
+                },
+                "args_json": {
+                    "type": "string"
+                },
+                "canceled": {
+                    "type": "boolean"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "host": {
+                    "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_types.HostApprovalSnapshot"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "mcp_tool_name": {
+                    "type": "string"
+                },
+                "pending_id": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "requested_at": {
+                    "type": "integer"
+                },
+                "resolved": {
+                    "type": "boolean"
+                },
+                "scope": {
+                    "type": "string"
+                },
+                "service_name": {
+                    "type": "string"
+                },
+                "timed_out": {
+                    "type": "boolean"
+                },
+                "timeout_seconds": {
+                    "type": "integer"
+                },
+                "tool_call_id": {
+                    "type": "string"
                 }
             }
         },
@@ -36059,6 +36304,19 @@
                 }
             }
         },
+        "github_com_Tencent_WeKnora_internal_types.WebSearchClients": {
+            "type": "object",
+            "properties": {
+                "fetch": {
+                    "description": "Fetch is the provider type whose API reads pages, or \"local\" for WeKnora's own reader.",
+                    "type": "string"
+                },
+                "search": {
+                    "description": "Search is the provider type whose API runs searches.",
+                    "type": "string"
+                }
+            }
+        },
         "github_com_Tencent_WeKnora_internal_types.WebSearchConfig": {
             "type": "object",
             "properties": {
@@ -36279,6 +36537,14 @@
         "github_com_Tencent_WeKnora_internal_types.WebSearchProviderTypeInfo": {
             "type": "object",
             "properties": {
+                "clients": {
+                    "description": "Search and fetch readers registered for this type; nil when the type is not registered.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_types.WebSearchClients"
+                        }
+                    ]
+                },
                 "config_fields": {
                     "description": "Provider-specific non-secret configuration rendered dynamically by the frontend.",
                     "type": "array",
@@ -39870,6 +40136,11 @@
                     "type": "string",
                     "x-agent": true
                 },
+                "published": {
+                    "description": "Publish (true) or unpublish (false) the agent for the OpenAI-compatible\nmodel gateway (/v1). Publishing rejects a name that another published\nagent in the workspace already uses (case-insensitive).",
+                    "type": "boolean",
+                    "x-agent": true
+                },
                 "selected_skills": {
                     "description": "Selected skill names, replacing the current ones; without\nskills_selection_mode it also switches the mode to selected",
                     "type": "array",
@@ -42338,6 +42609,96 @@
                     "maxLength": 128,
                     "minLength": 1,
                     "x-agent": true
+                }
+            }
+        },
+        "internal_handler_openai_compat.ErrorBody": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "param": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ErrorEnvelope": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "$ref": "#/definitions/internal_handler_openai_compat.ErrorBody"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ModelEntry": {
+            "type": "object",
+            "properties": {
+                "created": {
+                    "description": "Created is the publish instant (unix seconds); 0 when unknown.",
+                    "type": "integer"
+                },
+                "id": {
+                    "description": "ID is the agent UUID — the canonical model id. The agent's name is\naccepted as an alias on completions but the UUID is what clients should\npersist.",
+                    "type": "string"
+                },
+                "meta": {
+                    "description": "Meta carries WeKnora-specific display hints. Non-standard: OpenAI\nclients ignore unknown fields, WeKnora-aware UIs may render them.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/internal_handler_openai_compat.ModelMeta"
+                        }
+                    ]
+                },
+                "object": {
+                    "description": "Object is always \"model\".",
+                    "type": "string"
+                },
+                "owned_by": {
+                    "description": "OwnedBy is always \"weknora\".",
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ModelListResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_handler_openai_compat.ModelEntry"
+                    }
+                },
+                "object": {
+                    "description": "always \"list\"",
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handler_openai_compat.ModelMeta": {
+            "type": "object",
+            "properties": {
+                "agent_mode": {
+                    "description": "AgentMode is quick-answer or smart-reasoning.",
+                    "type": "string"
+                },
+                "agent_name": {
+                    "description": "AgentName is the human-readable agent name (also usable as a model\nalias on completions).",
+                    "type": "string"
+                },
+                "description": {
+                    "description": "Description is the agent's description, trimmed for list payloads.",
+                    "type": "string"
+                },
+                "is_builtin": {
+                    "description": "IsBuiltin marks workspace built-in agents.",
+                    "type": "boolean"
                 }
             }
         },

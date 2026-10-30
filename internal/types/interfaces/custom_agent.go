@@ -51,6 +51,15 @@ type CustomAgentService interface {
 	// a pointer to "" is an explicit clear.
 	UpdateAgent(ctx context.Context, agent *types.CustomAgent, avatar *string) (*types.CustomAgent, error)
 
+	// SetAgentPublished publishes or unpublishes an agent for the
+	// OpenAI-compatible model gateway. Publishing validates that the agent's
+	// name stays unique among the tenant's published agents (case-insensitive,
+	// trimmed) so the name can serve as a /v1 model id; a conflict returns
+	// ErrAgentPublishedNameConflict. Built-in agents cannot be published in
+	// this milestone: their rows may not exist locally and their config is
+	// registry-managed.
+	SetAgentPublished(ctx context.Context, id string, published bool) (*types.CustomAgent, error)
+
 	// DeleteAgent deletes an agent
 	// Parameters:
 	//   - ctx: Context information

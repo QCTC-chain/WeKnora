@@ -34,6 +34,7 @@ type Config struct {
 	PromptTemplates *PromptTemplatesConfig `yaml:"prompt_templates" json:"prompt_templates"`
 	IM              *IMConfig              `yaml:"im"               json:"im"`
 	Agent           *AgentConfig           `yaml:"agent"            json:"agent"`
+	Gateway         *GatewayConfig         `yaml:"gateway"           json:"gateway"`
 	// FrontendBaseURL is the externally-visible origin of the SPA, used
 	// to compose absolute share-link URLs. Empty falls back to a host-
 	// relative URL ("/register?token=…") which the SPA then resolves
@@ -67,6 +68,21 @@ const (
 	DefaultPromptHotWait = 120 * time.Second
 	DefaultPromptExpire  = 7 * 24 * time.Hour
 )
+
+// GatewayConfig configures the OpenAI-compatible model gateway (/v1) that
+// exposes published agents as models (docs/design/agent-model-gateway-m1.md).
+type GatewayConfig struct {
+	// Enabled mounts the gateway routes. Default false: the surface is
+	// opt-in until an operator decides to expose agents externally.
+	// Env override: GATEWAY_ENABLED=true|false.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+// IsEnabled reports whether the gateway surface should be mounted; nil-safe
+// for partially-built configs in tests.
+func (g *GatewayConfig) IsEnabled() bool {
+	return g != nil && g.Enabled
+}
 
 // PromptSuspend reports whether suspendable prompts may suspend their run.
 func (c *AgentConfig) PromptSuspend() bool {
@@ -634,6 +650,7 @@ func LoadConfig() (*Config, error) {
 	// Validate configuration values
 	applyOIDCEnvOverrides(&cfg)
 	applyAgentEnvOverrides(&cfg)
+	applyGatewayEnvOverrides(&cfg)
 	applyKnowledgeBaseEnvOverrides(&cfg)
 	applyNetworkEnvOverrides()
 	applyAuthAndTenantDefaults(&cfg)
@@ -869,6 +886,23 @@ func applyAgentEnvOverrides(cfg *Config) {
 		enabled := strings.EqualFold(value, "true")
 		cfg.Agent.PromptSuspendEnabled = &enabled
 	}
+}
+
+// applyGatewayEnvOverrides applies the GATEWAY_ENABLED opt-in for the
+// OpenAI-compatible model gateway. Accepts "1", "true", "yes", "on"
+// (case-insensitive) as enabling values; any other non-empty value disables.
+func applyGatewayEnvOverrides(cfg *Config) {
+	if cfg.Gateway == nil {
+		cfg.Gateway = &GatewayConfig{}
+	}
+	value := strings.TrimSpace(os.Getenv("GATEWAY_ENABLED"))
+	if value == "" {
+		return
+	}
+	cfg.Gateway.Enabled = strings.EqualFold(value, "1") ||
+		strings.EqualFold(value, "true") ||
+		strings.EqualFold(value, "yes") ||
+		strings.EqualFold(value, "on")
 }
 
 // applyAuthAndTenantDefaults fills in defaults for the Auth and Tenant

@@ -86,9 +86,10 @@ var versionedSQLiteColumns = map[string][]string{
 	"tenant_user_env_vars": {
 		"principal_type", "principal_id", "sandbox_config_id", "skill_id", "name", "value",
 	}, // 000028
+	"custom_agents": {"published", "published_at"}, // 000052 model-gateway publish flag
 }
 
-const expectedSQLiteMigrationVersion = 51
+const expectedSQLiteMigrationVersion = 52
 
 func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
 	repoRoot := sqliteRepoRoot(t)

@@ -779,6 +779,11 @@ definitions:
           Per-field "configured?" map. Omitted for builtin models unless the
           caller is a system administrator. See MCPServiceResponse.Credentials.
         type: object
+      default_for:
+        items:
+          type: string
+        type: array
+        x-agent: true
       description:
         type: string
         x-agent: true
@@ -1342,6 +1347,13 @@ definitions:
     type: object
   github_com_Tencent_WeKnora_internal_types.AgentStep:
     properties:
+      approvals:
+        description: |-
+          Approvals is the user decision for tools in this step. It is stored with
+          the step so a reloaded transcript can show what was allowed or refused.
+        items:
+          $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.ToolApprovalRecord'
+        type: array
       background_injections:
         description: |-
           BackgroundInjections are background-work messages delivered before this
@@ -2759,6 +2771,17 @@ definitions:
         description: Name of the agent
         type: string
         x-agent: true
+      published:
+        description: |-
+          Published marks the agent as callable through the OpenAI-compatible
+          model gateway (GET /v1/models, POST /v1/chat/completions). Default
+          false: an agent only becomes an externally selectable "model" after an
+          explicit publish. Unpublishing removes it from /v1/models immediately;
+          in-flight gateway requests already past resolution are not affected.
+        type: boolean
+      published_at:
+        description: PublishedAt records the last publish instant; cleared on unpublish.
+        type: string
       tenant_id:
         description: Tenant ID (composite primary key with ID)
         type: integer
@@ -3184,6 +3207,30 @@ definitions:
         type: string
       updated_at:
         description: Last update timestamp
+        type: string
+    type: object
+  github_com_Tencent_WeKnora_internal_types.DefaultSettings:
+    properties:
+      asr_model_id:
+        description: ASRModelID is the default ASR model.
+        type: string
+      chat_model_id:
+        description: ChatModelID is the default KnowledgeQA model.
+        type: string
+      embedding_model_id:
+        description: EmbeddingModelID is the default Embedding model.
+        type: string
+      rerank_model_id:
+        description: RerankModelID is the default Rerank model.
+        type: string
+      utility_model_id:
+        description: |-
+          UtilityModelID is the KnowledgeQA model for short generation tasks
+          such as writing MCP usage instructions. Empty follows the chat default.
+        type: string
+      vlm_model_id:
+        description: VLMModelID is the default VLLM or vision-capable KnowledgeQA
+          model.
         type: string
     type: object
   github_com_Tencent_WeKnora_internal_types.DockerSandboxConfig:
@@ -4059,6 +4106,29 @@ definitions:
       query:
         description: User query text
         type: string
+    type: object
+  github_com_Tencent_WeKnora_internal_types.HostApprovalSnapshot:
+    properties:
+      allow_session:
+        type: boolean
+      command:
+        type: string
+      cwd:
+        type: string
+      denial_snippet:
+        type: string
+      first_attempt_ran:
+        type: boolean
+      grant_access:
+        type: string
+      grant_path:
+        type: string
+      reason:
+        type: string
+      session_rules:
+        items:
+          type: string
+        type: array
     type: object
   github_com_Tencent_WeKnora_internal_types.ImageActionsConfig:
     properties:
@@ -8735,6 +8805,11 @@ definitions:
         - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.CredentialsConfig'
         description: 'Credentials config: third-party provider credentials (e.g. WeKnoraCloud
           AppID/AppSecret)'
+      default_settings:
+        allOf:
+        - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.DefaultSettings'
+        description: 'Default settings: the workspace''s default model for each type
+          and purpose'
       default_storage_backend_id:
         description: DefaultStorageBackendID is the workspace default concrete storage
           instance.
@@ -9050,6 +9125,41 @@ definitions:
         type: integer
       total_tokens:
         type: integer
+    type: object
+  github_com_Tencent_WeKnora_internal_types.ToolApprovalRecord:
+    properties:
+      approved:
+        type: boolean
+      args_json:
+        type: string
+      canceled:
+        type: boolean
+      description:
+        type: string
+      host:
+        $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.HostApprovalSnapshot'
+      kind:
+        type: string
+      mcp_tool_name:
+        type: string
+      pending_id:
+        type: string
+      reason:
+        type: string
+      requested_at:
+        type: integer
+      resolved:
+        type: boolean
+      scope:
+        type: string
+      service_name:
+        type: string
+      timed_out:
+        type: boolean
+      timeout_seconds:
+        type: integer
+      tool_call_id:
+        type: string
     type: object
   github_com_Tencent_WeKnora_internal_types.ToolCall:
     properties:
@@ -9487,6 +9597,16 @@ definitions:
         description: 需要重新初始化的原因
         type: string
     type: object
+  github_com_Tencent_WeKnora_internal_types.WebSearchClients:
+    properties:
+      fetch:
+        description: Fetch is the provider type whose API reads pages, or "local"
+          for WeKnora's own reader.
+        type: string
+      search:
+        description: Search is the provider type whose API runs searches.
+        type: string
+    type: object
   github_com_Tencent_WeKnora_internal_types.WebSearchConfig:
     properties:
       api_key:
@@ -9652,6 +9772,11 @@ definitions:
     - WebSearchProviderTypeDeepSeek
   github_com_Tencent_WeKnora_internal_types.WebSearchProviderTypeInfo:
     properties:
+      clients:
+        allOf:
+        - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.WebSearchClients'
+        description: Search and fetch readers registered for this type; nil when the
+          type is not registered.
       config_fields:
         description: Provider-specific non-secret configuration rendered dynamically
           by the frontend.
@@ -12384,6 +12509,13 @@ definitions:
         description: Agent name
         type: string
         x-agent: true
+      published:
+        description: |-
+          Publish (true) or unpublish (false) the agent for the OpenAI-compatible
+          model gateway (/v1). Publishing rejects a name that another published
+          agent in the workspace already uses (case-insensitive).
+        type: boolean
+        x-agent: true
       selected_skills:
         description: |-
           Selected skill names, replacing the current ones; without
@@ -14127,6 +14259,73 @@ definitions:
         type: string
         x-agent: true
     type: object
+  internal_handler_openai_compat.ErrorBody:
+    properties:
+      code:
+        type: string
+      message:
+        type: string
+      param:
+        type: string
+      type:
+        type: string
+    type: object
+  internal_handler_openai_compat.ErrorEnvelope:
+    properties:
+      error:
+        $ref: '#/definitions/internal_handler_openai_compat.ErrorBody'
+    type: object
+  internal_handler_openai_compat.ModelEntry:
+    properties:
+      created:
+        description: Created is the publish instant (unix seconds); 0 when unknown.
+        type: integer
+      id:
+        description: |-
+          ID is the agent UUID — the canonical model id. The agent's name is
+          accepted as an alias on completions but the UUID is what clients should
+          persist.
+        type: string
+      meta:
+        allOf:
+        - $ref: '#/definitions/internal_handler_openai_compat.ModelMeta'
+        description: |-
+          Meta carries WeKnora-specific display hints. Non-standard: OpenAI
+          clients ignore unknown fields, WeKnora-aware UIs may render them.
+      object:
+        description: Object is always "model".
+        type: string
+      owned_by:
+        description: OwnedBy is always "weknora".
+        type: string
+    type: object
+  internal_handler_openai_compat.ModelListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/internal_handler_openai_compat.ModelEntry'
+        type: array
+      object:
+        description: always "list"
+        type: string
+    type: object
+  internal_handler_openai_compat.ModelMeta:
+    properties:
+      agent_mode:
+        description: AgentMode is quick-answer or smart-reasoning.
+        type: string
+      agent_name:
+        description: |-
+          AgentName is the human-readable agent name (also usable as a model
+          alias on completions).
+        type: string
+      description:
+        description: Description is the agent's description, trimmed for list payloads.
+        type: string
+      is_builtin:
+        description: IsBuiltin marks workspace built-in agents.
+        type: boolean
+    type: object
   internal_handler_session.AttachmentUpload:
     properties:
       data:
@@ -14875,10 +15074,11 @@ paths:
       - application/json
       description: |-
         只修改请求中出现的字段，其余配置保持不变。
-        支持名称、描述、运行模式、系统提示词、对话模型、知识库、MCP、技能范围、联网搜索、多轮对话。
+        支持名称、描述、运行模式、系统提示词、对话模型、知识库、MCP、技能范围、联网搜索、多轮对话、发布开关。
         agent_mode 取 quick-answer 或 smart-reasoning。MCP 与技能只在 smart-reasoning 下运行，切到该模式会打开多轮对话。
         传 knowledge_bases、mcp_services 或 selected_skills 而不传对应模式时，切换为 selected。
         技能模式 all/none 清空技能列表；启用技能须先在编辑器选择沙箱，selected 名称须可用，否则返回 400。
+        published=true 将智能体发布到 OpenAI 兼容模型网关(/v1/models);发布要求智能体名称在已发布集合内唯一(忽略大小写)，冲突返回 409。
       parameters:
       - description: 智能体ID
         in: path
@@ -19955,6 +20155,46 @@ paths:
         target: knowledge_base.get
       x-agent-hint: Regenerates the AI summary of what the knowledge base covers,
         with one model call. A description the user wrote is kept.
+  /knowledge-bases/{id}/rebuild-index:
+    post:
+      description: |-
+        索引策略变更后，把知识库下全部文档提交重新解析。前端知识库设置弹窗
+        (KnowledgeBaseEditorModal) 在保存新策略后调用此接口，此前该路由在后端缺失，调用返回 404。
+      parameters:
+      - description: 知识库ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 任务已提交
+          schema:
+            $ref: '#/definitions/internal_handler.DataResponse'
+        "400":
+          description: 请求参数错误
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+        "403":
+          description: 权限不足
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+        "404":
+          description: 知识库不存在
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+        "409":
+          description: 有文档正在迁移中
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+      security:
+      - Bearer: []
+      - ApiKeyAuth: []
+      summary: 重建整个知识库的索引
+      tags:
+      - 知识管理
   /knowledge-bases/{id}/shares:
     get:
       description: 获取知识库的所有共享记录
@@ -29075,7 +29315,10 @@ paths:
     get:
       consumes:
       - application/json
-      description: 获取空间级别的KV配置（支持web-search-config、prompt-templates、parser-engine-config、storage-engine-config、chat-history-config、retrieval-config）
+      description: |-
+        获取空间级别的KV配置。支持 web-search-config、prompt-templates、parser-engine-config、
+        storage-engine-config、chat-history-config、retrieval-config、memory-config、
+        assistant-config、default-settings。
       parameters:
       - description: 配置键名
         in: path
@@ -29103,7 +29346,9 @@ paths:
     put:
       consumes:
       - application/json
-      description: 更新空间级别的KV配置（支持web-search-config、parser-engine-config、storage-engine-config、chat-history-config、retrieval-config）
+      description: |-
+        更新空间级别的KV配置。支持 web-search-config、parser-engine-config、storage-engine-config、
+        chat-history-config、retrieval-config、memory-config、assistant-config、default-settings。
       parameters:
       - description: 配置键名
         in: path
@@ -29298,6 +29543,33 @@ paths:
       summary: Unstar a resource
       tags:
       - User
+  /v1/models:
+    get:
+      description: |-
+        OpenAI 兼容端点:列出当前空间已发布(可通过网关调用)的智能体。
+        每个智能体呈现为一个 model,id 为智能体 UUID;meta.agent_name
+        同时可作为 chat/completions 的 model 别名。
+        鉴权使用 WeKnora API key(Authorization: Bearer 或 X-API-Key,需要 chat 能力位)。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 模型列表
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ModelListResponse'
+        "401":
+          description: 缺少或无效 API key
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ErrorEnvelope'
+        "403":
+          description: API key 缺少 chat 能力位
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ErrorEnvelope'
+      security:
+      - ApiKeyAuth: []
+      summary: 网关模型列表
+      tags:
+      - 模型网关
   /vector-stores:
     get:
       description: List all vector stores for the current workspace, including environment-configured

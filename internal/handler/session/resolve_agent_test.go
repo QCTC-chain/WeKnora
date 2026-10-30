@@ -94,6 +94,9 @@ func (s *resolveOwnAgentStub) UpdateAgent(
 func (s *resolveOwnAgentStub) DeleteAgent(context.Context, string) error {
 	panic("not implemented")
 }
+func (s *resolveOwnAgentStub) SetAgentPublished(context.Context, string, bool) (*types.CustomAgent, error) {
+	panic("not implemented")
+}
 func (s *resolveOwnAgentStub) CopyAgent(context.Context, string) (*types.CustomAgent, error) {
 	panic("not implemented")
 }

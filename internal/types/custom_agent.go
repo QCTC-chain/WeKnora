@@ -118,6 +118,15 @@ type CustomAgent struct {
 	// Agent configuration
 	Config CustomAgentConfig `yaml:"config" json:"config" gorm:"type:json" extensions:"x-agent"`
 
+	// Published marks the agent as callable through the OpenAI-compatible
+	// model gateway (GET /v1/models, POST /v1/chat/completions). Default
+	// false: an agent only becomes an externally selectable "model" after an
+	// explicit publish. Unpublishing removes it from /v1/models immediately;
+	// in-flight gateway requests already past resolution are not affected.
+	Published bool `yaml:"published" json:"published" gorm:"default:false;index"`
+	// PublishedAt records the last publish instant; cleared on unpublish.
+	PublishedAt *time.Time `yaml:"published_at" json:"published_at,omitempty"`
+
 	// Timestamps
 	CreatedAt time.Time      `yaml:"created_at" json:"created_at"`
 	UpdatedAt time.Time      `yaml:"updated_at" json:"updated_at" extensions:"x-agent"`

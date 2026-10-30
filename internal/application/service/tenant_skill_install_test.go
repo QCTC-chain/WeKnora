@@ -3173,6 +3173,12 @@ func (s *installCustomAgentService) UpdateAgent(
 
 func (s *installCustomAgentService) DeleteAgent(context.Context, string) error { return nil }
 
+func (s *installCustomAgentService) SetAgentPublished(
+	context.Context, string, bool,
+) (*types.CustomAgent, error) {
+	return nil, nil
+}
+
 func (s *installCustomAgentService) CopyAgent(
 	context.Context, string,
 ) (*types.CustomAgent, error) {

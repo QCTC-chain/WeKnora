@@ -22,6 +22,11 @@ var (
 	ErrCannotModifyBuiltin = errors.New("cannot modify built-in agent basic info")
 	ErrCannotDeleteBuiltin = errors.New("cannot delete built-in agent")
 	ErrAgentNameRequired   = errors.New("agent name is required")
+	// ErrAgentPublishedNameConflict reports a publish attempt whose agent name
+	// (trimmed, case-insensitive) already belongs to another published agent
+	// in the same workspace. Published names double as /v1 model ids, so they
+	// must stay unambiguous for external clients.
+	ErrAgentPublishedNameConflict = errors.New("another published agent already uses this name")
 )
 
 const (
@@ -325,6 +330,88 @@ func (s *customAgentService) UpdateAgent(
 
 	logger.Infof(ctx, "Custom agent updated successfully, ID: %s", agent.ID)
 	return existingAgent, nil
+}
+
+// SetAgentPublished flips the gateway publish flag of an agent.
+//
+// Publishing enforces uniqueness of the agent name among the workspace's
+// published agents (trimmed, case-insensitive): the name doubles as a
+// human-readable model id on GET /v1/models, so two published agents with
+// the same name would make model resolution ambiguous for external clients.
+// Built-in agents are rejected: their rows may be absent locally (they are
+// synthesized from the registry on read) and their lifecycle is
+// registry-managed, so gateway publish for them waits for the M2 release
+// governance work.
+func (s *customAgentService) SetAgentPublished(
+	ctx context.Context, id string, published bool,
+) (*types.CustomAgent, error) {
+	tenantID, ok := types.TenantIDFromContext(ctx)
+	if !ok {
+		return nil, ErrInvalidTenantID
+	}
+	existing, err := s.repo.GetAgentByID(ctx, id, tenantID)
+	if err != nil {
+		if errors.Is(err, repository.ErrCustomAgentNotFound) {
+			return nil, ErrAgentNotFound
+		}
+		return nil, err
+	}
+	if existing.IsBuiltin {
+		return nil, ErrCannotModifyBuiltin
+	}
+	if existing.Published == published {
+		// Idempotent no-op: still return the current row so callers always
+		// get the agent the flag now (already) points at.
+		return existing, nil
+	}
+	if published {
+		if err := s.ensurePublishedNameAvailable(ctx, tenantID, existing.ID, existing.Name); err != nil {
+			return nil, err
+		}
+		now := time.Now()
+		existing.Published = true
+		existing.PublishedAt = &now
+	} else {
+		existing.Published = false
+		existing.PublishedAt = nil
+	}
+	existing.UpdatedAt = time.Now()
+	if err := s.repo.UpdateAgent(ctx, existing); err != nil {
+		logger.ErrorWithFields(ctx, err, map[string]interface{}{"agent_id": id})
+		return nil, err
+	}
+	if published {
+		logger.Infof(ctx, "Agent published for model gateway, ID: %s", id)
+	} else {
+		logger.Infof(ctx, "Agent unpublished from model gateway, ID: %s", id)
+	}
+	return existing, nil
+}
+
+// ensurePublishedNameAvailable rejects a publish when another published
+// agent in the tenant already claims the same name (trimmed,
+// case-insensitive). The agent's own row is skipped so re-publishing an
+// already-published name never trips.
+func (s *customAgentService) ensurePublishedNameAvailable(
+	ctx context.Context, tenantID uint64, agentID, name string,
+) error {
+	wanted := strings.TrimSpace(name)
+	if wanted == "" {
+		return ErrAgentNameRequired
+	}
+	agents, err := s.repo.ListAgentsByTenantID(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	for _, other := range agents {
+		if other == nil || other.ID == agentID || !other.Published {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(other.Name), wanted) {
+			return ErrAgentPublishedNameConflict
+		}
+	}
+	return nil
 }
 
 // checkSharedAgentKBScope keeps an edit from widening a shared agent's KB

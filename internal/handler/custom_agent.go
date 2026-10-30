@@ -112,6 +112,22 @@ type PatchAgentRequest struct {
 	WebSearchProviderID *string `json:"web_search_provider_id" extensions:"x-agent"`
 	// Whether earlier turns are kept in the conversation context
 	MultiTurnEnabled *bool `json:"multi_turn_enabled" extensions:"x-agent"`
+	// Publish (true) or unpublish (false) the agent for the OpenAI-compatible
+	// model gateway (/v1). Publishing rejects a name that another published
+	// agent in the workspace already uses (case-insensitive).
+	Published *bool `json:"published" extensions:"x-agent"`
+}
+
+// publishOnly reports whether `published` is the sole field in the request;
+// such a PATCH skips the config-update path (built-in agents can never go
+// through it, and a pure publish must not re-validate unrelated config).
+func (p PatchAgentRequest) publishOnly() bool {
+	return p.Name == nil && p.Description == nil && p.AgentMode == nil &&
+		p.SystemPrompt == nil && p.ModelID == nil && p.KBSelectionMode == nil &&
+		p.KnowledgeBases == nil && p.MCPSelectionMode == nil && p.MCPServices == nil &&
+		p.SkillsSelectionMode == nil && p.SelectedSkills == nil &&
+		p.WebSearchEnabled == nil && p.WebSearchProviderID == nil &&
+		p.MultiTurnEnabled == nil
 }
 
 // apply overlays the request onto an agent's current state, as an update
@@ -522,10 +538,11 @@ func (h *CustomAgentHandler) UpdateAgent(c *gin.Context) {
 // PatchAgent godoc
 // @Summary      部分更新智能体
 // @Description  只修改请求中出现的字段，其余配置保持不变。
-// @Description  支持名称、描述、运行模式、系统提示词、对话模型、知识库、MCP、技能范围、联网搜索、多轮对话。
+// @Description  支持名称、描述、运行模式、系统提示词、对话模型、知识库、MCP、技能范围、联网搜索、多轮对话、发布开关。
 // @Description  agent_mode 取 quick-answer 或 smart-reasoning。MCP 与技能只在 smart-reasoning 下运行，切到该模式会打开多轮对话。
 // @Description  传 knowledge_bases、mcp_services 或 selected_skills 而不传对应模式时，切换为 selected。
 // @Description  技能模式 all/none 清空技能列表；启用技能须先在编辑器选择沙箱，selected 名称须可用，否则返回 400。
+// @Description  published=true 将智能体发布到 OpenAI 兼容模型网关(/v1/models);发布要求智能体名称在已发布集合内唯一(忽略大小写)，冲突返回 409。
 // @Tags         智能体
 // @Accept       json
 // @Produce      json
@@ -561,6 +578,37 @@ func (h *CustomAgentHandler) PatchAgent(c *gin.Context) {
 	if !validSelectionMode(patch.KBSelectionMode) || !validSelectionMode(patch.MCPSelectionMode) ||
 		!validSelectionMode(patch.SkillsSelectionMode) {
 		_ = c.Error(errors.NewBadRequestError("selection mode must be all, selected or none"))
+		return
+	}
+	// Gateway publish state is its own transaction: apply it first so a
+	// publish-only PATCH answers directly and a combined PATCH keeps the
+	// invariant "publish exposes the last saved config". A publish conflict
+	// (409) aborts before any config change is attempted.
+	var publishedAgent *types.CustomAgent
+	if patch.Published != nil {
+		var pubErr error
+		publishedAgent, pubErr = h.service.SetAgentPublished(ctx, id, *patch.Published)
+		if pubErr != nil {
+			logger.ErrorWithFields(ctx, pubErr, map[string]interface{}{"agent_id": id})
+			switch pubErr {
+			case service.ErrAgentNotFound:
+				_ = c.Error(errors.NewNotFoundError("Agent not found"))
+			case service.ErrCannotModifyBuiltin:
+				_ = c.Error(errors.NewForbiddenError("Cannot publish built-in agent"))
+			case service.ErrAgentPublishedNameConflict:
+				_ = c.Error(errors.NewConflictError(
+					"Another published agent already uses this name; rename it first"))
+			case service.ErrAgentNameRequired:
+				_ = c.Error(errors.NewBadRequestError(
+					"Agent must have a name before it can be published"))
+			default:
+				_ = c.Error(errors.NewInternalServerError("Failed to update agent"))
+			}
+			return
+		}
+	}
+	if patch.Published != nil && patch.publishOnly() {
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": publishedAgent})
 		return
 	}
 	existing, err := h.service.GetAgentByID(ctx, id)
