@@ -163,6 +163,14 @@ export default defineConfig({
         timeout: 3_600_000,
         proxyTimeout: 3_600_000,
       },
+      '/v1/': {
+        target: DEV_PROXY_TARGET,
+        changeOrigin: true,
+        secure: false,
+        // 网关补全在 stream 模式下是长连接 SSE，沿用 /mcp/ 的长超时。
+        timeout: 3_600_000,
+        proxyTimeout: 3_600_000,
+      },
       '/api': {
         target: DEV_PROXY_TARGET,
         changeOrigin: true,
@@ -193,6 +201,14 @@ export default defineConfig({
         target: DEV_PROXY_TARGET,
         changeOrigin: true,
         secure: false,
+        timeout: 3_600_000,
+        proxyTimeout: 3_600_000,
+      },
+      '/v1/': {
+        target: DEV_PROXY_TARGET,
+        changeOrigin: true,
+        secure: false,
+        // 网关补全在 stream 模式下是长连接 SSE，沿用 /mcp/ 的长超时。
         timeout: 3_600_000,
         proxyTimeout: 3_600_000,
       },

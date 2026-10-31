@@ -28,6 +28,23 @@ GATEWAY_ENABLED=true
 
 使用空间级或平台级 API key(`Authorization: Bearer <key>` 或 `X-API-Key: <key>`),key 需要 **`chat` capability**(或 `full_access`)。网关挂在 `/v1` 前缀下,不走 `/api/v1` 的 JWT 认证;密钥格式与创建方式同 [API 总览](01-api-overview.md#_2-api-key-机器主体)。
 
+> **同源访问与反向代理**:仓库自带的 `frontend/nginx.conf` 已配置 `location /v1/` 转发到后端,前端页面里复制的 `http://<部署地址>/v1/...` 开箱即用。若你用**自管 nginx** 反代 WeKnora(而非仓库镜像),需要加同款 location,并沿用 SSE 设置(`proxy_buffering off`、`proxy_http_version 1.1`、长读超时),否则 `/v1/*` 会落到 SPA 回退页:
+>
+> ```nginx
+> location /v1/ {
+>     proxy_pass http://weknora-backend:8080;   # 换成你的后端 upstream
+>     proxy_set_header Host $http_host;
+>     proxy_set_header X-Real-IP $remote_addr;
+>     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+>     proxy_set_header X-Forwarded-Proto $scheme;
+>     proxy_http_version 1.1;
+>     proxy_set_header Connection "";
+>     proxy_buffering off;
+>     proxy_read_timeout 3600s;
+>     proxy_send_timeout 3600s;
+> }
+> ```
+
 ```bash
 BASE=http://localhost:8080
 KEY=sk-xxxx   # POST /api/v1/tenants/:id/api-keys 创建,勾选 chat 能力
