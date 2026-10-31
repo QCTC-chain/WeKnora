@@ -28,7 +28,7 @@ func serveMessagesWithScope(
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	handler := NewGatewayHandler(svc, &fakeGatewaySessions{script: script}, &fakeGatewayMessages{}, nil, nil, usage, nil, nil)
+	handler := NewGatewayHandler(svc, &fakeGatewaySessions{script: script}, &fakeGatewayMessages{}, nil, nil, usage, nil, nil, nil)
 	router.POST("/v1/messages", func(c *gin.Context) {
 		ctx := context.WithValue(c.Request.Context(), types.TenantIDContextKey, uint64(42))
 		if scope != nil {
@@ -251,7 +251,7 @@ func TestAnthropicMessagesIdempotentReplay(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := newFakeIdempotencyStore()
 	handler := NewGatewayHandler(svc, &fakeGatewaySessions{script: answerScript},
-		&fakeGatewayMessages{}, nil, nil, &fakeGatewayUsage{}, store, nil)
+		&fakeGatewayMessages{}, nil, nil, &fakeGatewayUsage{}, store, nil, nil)
 	router := gin.New()
 	router.POST("/v1/messages", func(c *gin.Context) {
 		ctx := context.WithValue(c.Request.Context(), types.TenantIDContextKey, uint64(42))

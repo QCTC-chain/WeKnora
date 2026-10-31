@@ -191,6 +191,10 @@ type ResumableAgentRequest struct {
 	AssistantAccess AssistantAccessLevel `json:"assistant_access,omitempty"`
 	UserMessageID   string               `json:"user_message_id,omitempty"`
 	Language        string               `json:"language,omitempty"`
+	// ClientTools freezes the gateway caller's tool definitions into the
+	// suspended run (M3-1): the resume path re-registers them even when the
+	// resuming request omits tools[].
+	ClientTools []ClientToolSpec `json:"client_tools,omitempty"`
 }
 
 // ToolApprovalPromptRequest is the Request of an AgentPromptKindToolApproval.

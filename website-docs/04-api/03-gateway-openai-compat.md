@@ -93,6 +93,8 @@ curl -N $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" \
 
 多模态:`content` 数组中的 `image_url` 仅在智能体开启图片能力时生效(每次最多 4 张、单张 ≤10MB),否则忽略并在 `meta.warnings` 提示。
 
+**客户端工具(M3-1)**:请求可带 `tools[]`(仅 `type:"function"`),把调用方自己的函数工具桥接进智能体运行——模型决定调用时,响应以 `finish_reason:"tool_calls"` 挂起,详见[客户端工具桥](#客户端工具桥m3-1)。受智能体的 `gateway_tool_policy` 控制:策略为 `none` 时 `tools[]` 计数后忽略(在 `meta.client_tools_ignored` 回显)。
+
 ### POST /v1/messages(Anthropic 兼容,M2-5)
 
 Claude Code、pi 等原生讲 Anthropic Messages 协议的客户端可直接调用,管线(鉴权/授权/配额/幂等/会话续接/审计/计量)与 `/v1/chat/completions` 完全一致,仅协议壳不同:
@@ -105,11 +107,30 @@ curl -X POST http://localhost:8080/v1/messages \
 ```
 
 - **鉴权**:`x-api-key` 头(或 `Authorization: Bearer`),与 OpenAI 端点同一把 API key。
-- **请求映射**:顶层 `system`(字符串或块数组)→ 系统消息;`text`/`image` content 块同 OpenAI(`image` base64 → data URL,受同样的图片能力/数量/大小限制);`tool_use`/`tool_result` 块按 M1 语义文本化记录,**不执行客户端工具**;`tools` 计数后忽略;`metadata.user_id` 参与会话续接派生身份。
+- **请求映射**:顶层 `system`(字符串或块数组)→ 系统消息;`text`/`image` content 块同 OpenAI(`image` base64 → data URL,受同样的图片能力/数量/大小限制);`tools`(`name`/`description`/`input_schema`)与 OpenAI 壳一样桥接为客户端工具(M3-1),模型调用以 `stop_reason:"tool_use"` + `tool_use` content 块返回;上一轮的 `tool_result` 块按桥接语义续跑;`metadata.user_id` 参与会话续接派生身份。
 - **流式**(`"stream":true`):SSE 事件 `message_start` → `content_block_delta`(`text_delta`/`thinking_delta`)→ `message_delta`(`stop_reason:"end_turn"` + output usage)→ `message_stop`;内容产生前以 `: keep-alive` 注释帧保活。thinking 类事件映射为 `thinking_delta`。
-- **非流式**:返回 Anthropic `message` 对象(单 `text` 块,`stop_reason:"end_turn"`,`usage.input_tokens`/`output_tokens` 为内部累计值)。
+- **非流式**:返回 Anthropic `message` 对象(`stop_reason:"end_turn"`,发起客户端工具调用时为 `"tool_use"`,`usage.input_tokens`/`output_tokens` 为内部累计值)。
 - **续接/幂等**:`X-WeKnora-Session-ID` 与 `Idempotency-Key` 头语义与 OpenAI 端点相同。
 - **错误壳**:`{"type":"error","error":{"type":"not_found_error","message":...}}`,类型按状态映射(400→`invalid_request_error`、401→`authentication_error`、403→`permission_error`、404→`not_found_error`、429→`rate_limit_error`、其余→`api_error`)。
+
+## 客户端工具桥(M3-1)
+
+智能体已发布且 `gateway_tool_policy` 不是 `none` 时,调用方可在请求中携带 `tools[]` 声明自己的函数工具(最多 32 个,名称在工作空间内查重,`parameters` 必须是 JSON Schema 对象)。智能体运行到需要调用方工具时,**网关把当次响应挂起并以工具调用应答**;调用方执行工具后,把结果放回下一轮请求即可续跑同一运行:
+
+1. 首轮:请求带 `tools` → 模型决定调用 → 响应 `finish_reason:"tool_calls"`(Anthropic 壳为 `stop_reason:"tool_use"`),`message.tool_calls[].id` 是自描述的 `wc1_…` 令牌(HMAC 签名,内含挂起提示与到期时间,默认 72h),`meta.bridge_pending:true`;此时该轮的智能体运行已挂起,结果不会丢失。
+2. 续轮:同一请求体中,把每条工具结果作为 `role:"tool"` 消息追加(`tool_call_id` 原样回传 `wc1_…` 令牌,`content` 为工具输出文本;Anthropic 壳用 `tool_result` 块)。网关解码令牌、解析挂起状态、校验结果完整性(每个调用恰好一条结果,单条 ≤32000 字符)后恢复运行,返回最终答案。
+3. 一次挂起最多携带 32 个调用;部分结果不完整返回 400 并指出缺失的 `tool_call_id`。
+
+**约束与错误**:
+
+- 调用方工具与智能体内置工具同名时,调用方工具以 `client_<name>` 注册,对外名称不变。
+- `tool_calls` 令牌过期后解码报 400(`expired`);此时结果已无法续跑,需重新发起首轮请求。
+- 续轮请求必须落在同一个已发布智能体上,跨智能体续跑返回 409 `model_mismatch`。
+- 网关实例未启用挂起恢复(如降级部署)时返回 503 `bridge_unavailable`;`tools[]` 的首轮工具调用应答不受影响。
+- 续轮与首轮一样受鉴权、授权、配额、并发与幂等约束;挂起期间的运行快照在提示过期后由回收任务清理。
+- 配置 `GATEWAY_TOOL_BRIDGE_SECRET`(≥32 字符)可为令牌签名指定显式密钥;未配置时按实例 ID 派生,**多副本部署必须显式配置**,否则副本间令牌无法互认。
+
+**管理端**:智能体编辑页「发布为模型」页签(或 `PATCH /api/v1/agents/:id` 的 `gateway_tool_policy` 字段)可选择策略——`all`(默认,内置工具 + 调用方工具)、`client_only`(仅调用方工具,内置工具对网关调用方隐藏)、`none`(忽略调用方工具,M1 行为)。策略随发布快照冻结,重新发布后生效于新版本。
 
 ### GET /v1/metrics(可观测性,M2-6)
 
@@ -141,6 +162,9 @@ Prometheus 文本格式 exposition(与网关共用 Bearer / `X-API-Key` 鉴权),
 | 409 | `session_busy` / `request_in_progress` / `idempotency_key_mismatch` | 会话已有进行中的轮 / 同 key 幂等键正在执行 / 幂等键复用到不同请求体 |
 | 429 | `concurrency_limit` | 该 key 并发数超过 `GATEWAY_MAX_CONCURRENCY_PER_KEY` |
 | 429 | `budget_exceeded` | 命中 key 或工作空间的每日 token/请求配额(消息内含 UTC 重置时间提示) |
+| 400 | (参数级) | 工具桥:`tools[]` 定义非法(非 function、名称为空/重复、`parameters` 非 JSON 对象、超过 32 个);工具结果缺失对应 `tool_call_id`、单条超 32000 字符,或 `wc1_` 令牌非法/过期 |
+| 409 | `model_mismatch` | 工具桥续轮的 model 与挂起运行的智能体不一致 |
+| 503 | `bridge_unavailable` | 网关实例未启用挂起恢复,无法续跑客户端工具轮 |
 | 500 | `internal_error` | 会话/消息创建或智能体运行失败 |
 
 ## 审计与限流
@@ -169,7 +193,7 @@ Prometheus 文本格式 exposition(与网关共用 Bearer / `X-API-Key` 鉴权),
 
 ## M1/M2 已知限制
 
-- 客户端 `tools` / `function` 定义**不透传**(不执行客户端工具),OpenAI 壳响应 `finish_reason` 恒为 `stop`,Anthropic 壳 `stop_reason` 恒为 `end_turn`;发送了 tools 时在 `meta.client_tools_ignored` 回显数量。双向工具桥在 M3(HITL)实现。
+- 客户端 `tools` 默认**被忽略**仅当智能体的 `gateway_tool_policy` 为 `none`(M1 行为,数量在 `meta.client_tools_ignored` 回显);其余策略下工具调用经 `finish_reason:"tool_calls"` 桥接,见[客户端工具桥](#客户端工具桥m3-1)。
 - 无跨请求记忆(除非用 `X-WeKnora-Session-ID` 续接);`temperature` 等采样参数以智能体配置为准(在 `meta.ignored_params` 回显)。
 - `usage` 为内部 agent loop 各轮 LLM 调用的**累计值**(含检索、工具轮),通常显著大于客户端按输入长度估算的预期。
 - 长任务受 `GATEWAY_REQUEST_TIMEOUT` 约束,超时时流式路径返回已产生的部分内容并在 `meta.warnings` 标注;非流式路径同样返回部分内容。

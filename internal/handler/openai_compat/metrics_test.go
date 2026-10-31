@@ -67,7 +67,7 @@ func metricsTurnRouter(
 	if audit != nil {
 		auditSink = audit
 	}
-	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, auditSink, nil, usage, nil, cfg)
+	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, auditSink, nil, usage, nil, nil, cfg)
 	router := gin.New()
 	// Mounted like production so gateway_requests_total counts the turns.
 	router.Use(GatewayMetricsMiddleware)
@@ -145,7 +145,7 @@ func TestGatewayMetricsAnthropicRequests(t *testing.T) {
 		gatewayAgent("agt-1", "Doc QA", types.GatewayScopeTenant, "u1"),
 	}}
 	gin.SetMode(gin.TestMode)
-	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, nil, nil, nil, nil, nil)
+	handler := NewGatewayHandler(fakes.agents, fakes.sessions, fakes.messages, nil, nil, nil, nil, nil, nil)
 	router := gin.New()
 	router.Use(GatewayMetricsMiddleware)
 	router.POST("/v1/messages", func(c *gin.Context) {

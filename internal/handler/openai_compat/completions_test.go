@@ -37,6 +37,22 @@ type fakeGatewaySessions struct {
 	// GetSessionByID return; touched records TouchGatewaySession calls.
 	thread  *types.Session
 	touched []string
+
+	// existing is what GetSession returns (M3-1 bridge resume loads the
+	// suspended session directly).
+	existing *types.Session
+}
+
+func (f *fakeGatewaySessions) GetSession(_ context.Context, id string) (*types.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.existing != nil && f.existing.ID == id {
+		return f.existing, nil
+	}
+	if f.thread != nil && f.thread.ID == id {
+		return f.thread, nil
+	}
+	return nil, errors.New("session not found: " + id)
 }
 
 func (f *fakeGatewaySessions) CreateSession(_ context.Context, s *types.Session) (*types.Session, error) {
@@ -85,6 +101,17 @@ func (f *fakeGatewayMessages) CreateMessage(_ context.Context, m *types.Message)
 	out.ID = fmt.Sprintf("%s-%d", m.Role, f.nextID)
 	f.created = append(f.created, &out)
 	return &out, nil
+}
+
+func (f *fakeGatewayMessages) GetMessage(_ context.Context, sessionID, id string) (*types.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.created {
+		if m.ID == id {
+			return m, nil
+		}
+	}
+	return nil, fmt.Errorf("message %s not found", id)
 }
 
 func (f *fakeGatewayMessages) UpdateMessage(_ context.Context, m *types.Message) error {
@@ -408,8 +435,10 @@ func reqs2ImageURLs(t *testing.T, fakes completionsFakes) []string {
 func TestChatCompletionsClientToolsIgnored(t *testing.T) {
 	body := `{"model":"agt-1","stream":false,"tools":[{"type":"function","function":{"name":"read_file","parameters":{}}}],` +
 		`"temperature":0.3,"messages":[{"role":"user","content":"hi"}]}`
+	agent := publishedAgent("agt-1", "Doc QA", true)
+	agent.Config.GatewayToolPolicy = "none" // M1 behavior preserved
 	fakes := completionsFakes{
-		agents:   &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
+		agents:   &fakeAgentService{agents: []*types.CustomAgent{agent}},
 		sessions: &fakeGatewaySessions{script: answerScript},
 		messages: &fakeGatewayMessages{},
 	}
@@ -420,5 +449,54 @@ func TestChatCompletionsClientToolsIgnored(t *testing.T) {
 	require.NotNil(t, resp.Meta)
 	assert.Equal(t, 1, resp.Meta.ClientToolsIgnored)
 	assert.Contains(t, resp.Meta.IgnoredParams, "temperature")
-	assert.Equal(t, FinishStop, resp.Choices[0].FinishReason, "client tools never produce tool_calls in M1")
+	assert.Equal(t, FinishStop, resp.Choices[0].FinishReason, "policy none keeps the M1 ignored-tools behavior")
+}
+
+func TestChatCompletionsClientToolsBridged(t *testing.T) {
+	body := `{"model":"agt-1","stream":false,"tools":[{"type":"function","function":{"name":"read_file","description":"Reads a file","parameters":{"type":"object","properties":{}}}}],` +
+		`"messages":[{"role":"user","content":"hi"}]}`
+	fakes := completionsFakes{
+		agents:   &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
+		sessions: &fakeGatewaySessions{script: answerScript},
+		messages: &fakeGatewayMessages{},
+	}
+	rec := serveCompletions(t, fakes, body, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp ChatCompletionResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Meta)
+	assert.Zero(t, resp.Meta.ClientToolsIgnored, "bridged tools are not ignored")
+	assert.Equal(t, FinishStop, resp.Choices[0].FinishReason)
+	fakes.sessions.mu.Lock()
+	require.Len(t, fakes.sessions.qaRequests, 1)
+	qa := fakes.sessions.qaRequests[0]
+	fakes.sessions.mu.Unlock()
+	require.Len(t, qa.ClientTools, 1)
+	assert.Equal(t, "read_file", qa.ClientTools[0].Name)
+	assert.True(t, qa.Suspendable, "bridge turns park the run on client-tool calls")
+}
+
+func TestChatCompletionsClientToolsInvalidSpec(t *testing.T) {
+	cases := []struct {
+		name string
+		tool string
+		want string
+	}{
+		{"bad type", `{"type":"web_search"}`, "function"},
+		{"empty name", `{"type":"function","function":{"name":"","parameters":{}}}`, "name"},
+		{"bad params json", `{"type":"function","function":{"name":"ok","parameters":123}}`, "JSON object"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"agt-1","stream":false,"tools":[` + tc.tool + `],"messages":[{"role":"user","content":"hi"}]}`
+			fakes := completionsFakes{
+				agents:   &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
+				sessions: &fakeGatewaySessions{script: answerScript},
+				messages: &fakeGatewayMessages{},
+			}
+			rec := serveCompletions(t, fakes, body, "")
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), tc.want)
+		})
+	}
 }

@@ -76,7 +76,7 @@ func serveContinuation(
 		&fakeAgentService{agents: []*types.CustomAgent{
 			gatewayAgent("agt-1", "Doc QA", types.GatewayScopeTenant, "u1"),
 		}},
-		sessions, &fakeGatewayMessages{}, nil, nil, nil, nil, nil)
+		sessions, &fakeGatewayMessages{}, nil, nil, nil, nil, nil, nil)
 	router.POST("/v1/chat/completions", func(c *gin.Context) {
 		ctx := c.Request.Context()
 		if userID != "" {
@@ -176,7 +176,7 @@ func TestGatewayContinuationSessionBusy409(t *testing.T) {
 		&fakeAgentService{agents: []*types.CustomAgent{
 			gatewayAgent("agt-1", "Doc QA", types.GatewayScopeTenant, "u1"),
 		}},
-		sessions, &fakeGatewayMessages{}, nil, nil, nil, nil, nil)
+		sessions, &fakeGatewayMessages{}, nil, nil, nil, nil, nil, nil)
 	sessions.mu.Lock()
 	sessions.thread = threadSession("sess-live", "user-1", "agt-1", time.Now())
 	sessions.mu.Unlock()

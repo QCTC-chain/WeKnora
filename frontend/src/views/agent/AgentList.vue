@@ -184,6 +184,11 @@
                     <div class="popup-menu">
                       <div v-if="canManageAgent(agent)" class="popup-menu-item" @click="handleEdit(agent)"><t-icon
                           class="menu-icon" name="edit" /><span>{{ $t('common.edit') }}</span></div>
+                      <div v-if="!agent.is_builtin && !authStore.isLiteMode" class="popup-menu-item"
+                        @click="handlePublishAsModel(agent)">
+                        <t-icon class="menu-icon" name="cloud" />
+                        <span>{{ $t('agentEditor.gateway.navLabel') }}</span>
+                      </div>
                       <div v-if="authStore.hasRole('contributor')" class="popup-menu-item" @click="handleCopy(agent)">
                         <t-icon class="menu-icon" name="file-copy" /><span>{{ $t('common.copy') }}</span>
                       </div>
@@ -1292,6 +1297,16 @@ const handleEdit = (agent: AgentWithUI) => {
   editingAgent.value = agent
   editorMode.value = 'edit'
   editorInitialSection.value = 'basic'
+  editorInitialHighlightField.value = ''
+  editorVisible.value = true
+}
+
+// 直接打开编辑器的「发布为模型」页签（网关发布治理）
+const handlePublishAsModel = (agent: AgentWithUI) => {
+  openMoreAgentId.value = null
+  editingAgent.value = agent
+  editorMode.value = 'edit'
+  editorInitialSection.value = 'gateway'
   editorInitialHighlightField.value = ''
   editorVisible.value = true
 }

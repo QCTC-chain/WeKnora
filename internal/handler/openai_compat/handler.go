@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/agent/hitl"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -34,6 +35,10 @@ type GatewayHandler struct {
 	// turnLocks serializes turns per continued session (M2-3): concurrent
 	// sends on one thread answer 409 session_busy.
 	turnLocks *sessionTurnLocks
+	// toolBridge resolves suspended external_tool_call prompts (M3-1).
+	// Nil in tests: tool-call responses still work, but a follow-up with
+	// results answers 503 (documented degradation).
+	toolBridge *hitl.Broker
 	// idempotency stores (key, Idempotency-Key) claims for response replay
 	// (M2-4). Nil in tests: header ignored (documented degradation).
 	idempotency interfaces.GatewayIdempotencyStore
@@ -58,9 +63,10 @@ func NewGatewayHandler(
 	shares interfaces.AgentShareRepository,
 	usage interfaces.GatewayUsageService,
 	idempotency interfaces.GatewayIdempotencyStore,
+	toolBridge *hitl.Broker,
 	cfg *config.Config,
 ) *GatewayHandler {
-	h := &GatewayHandler{agents: agents, sessions: sessions, messages: messages, audit: audit, shares: shares, usage: usage, idempotency: idempotency, concurrency: newPerKeyConcurrency(), turnLocks: newSessionTurnLocks()}
+	h := &GatewayHandler{agents: agents, sessions: sessions, messages: messages, audit: audit, shares: shares, usage: usage, idempotency: idempotency, toolBridge: toolBridge, concurrency: newPerKeyConcurrency(), turnLocks: newSessionTurnLocks()}
 	if cfg != nil {
 		h.gateway = cfg.Gateway
 	}

@@ -22981,7 +22981,7 @@ const docTemplate = `{
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "OpenAI 兼容端点:把一次 chat/completions 请求作为单轮提问发给\n指定的已发布智能体。messages 数组整体折叠为一轮 query(调用方指令 +\n对话历史 + 本次问题),每次调用创建 Kind=gateway 的临时会话,\n跑完留在库中供审计(默认 72h 后由回收任务清理)。M1 不执行客户端\ntools;temperature 等采样参数以智能体配置为准。\nstream=true 走 SSE(chat.completion.chunk + [DONE]),\n首个内容前每 15s 输出 keep-alive 注释行;stream=false 聚合返回。\n每 key 并发默认上限 3,超限立即 429(concurrency_limit)。",
+                "description": "OpenAI 兼容端点:把一次 chat/completions 请求作为单轮提问发给\n指定的已发布智能体。messages 数组整体折叠为一轮 query(调用方指令 +\n对话历史 + 本次问题),每次调用创建 Kind=gateway 的临时会话,\n跑完留在库中供审计(默认 72h 后由回收任务清理)。tools[] 中的\nfunction 定义按智能体 gateway_tool_policy 处理:默认桥接为客户端\n工具(模型调用时以 finish_reason=\"tool_calls\" 挂起,续轮带 tool\n消息恢复运行),策略为 none 时计数忽略并回显 meta.client_tools_ignored;\ntemperature 等采样参数以智能体配置为准。\nstream=true 走 SSE(chat.completion.chunk + [DONE]),\n首个内容前每 15s 输出 keep-alive 注释行;stream=false 聚合返回。\n每 key 并发默认上限 3,超限立即 429(concurrency_limit)。",
                 "consumes": [
                     "application/json"
                 ],
@@ -23045,7 +23045,7 @@ const docTemplate = `{
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "以 Anthropic Messages 协议调用已发布的智能体(system/messages/content blocks,SSE 事件流)",
+                "description": "以 Anthropic Messages 协议调用已发布的智能体(system/messages/content blocks,SSE 事件流)。\ntools(input_schema)按智能体 gateway_tool_policy 桥接:模型调用时返回\nstop_reason=\"tool_use\" + tool_use 块,续轮以 tool_result 块恢复运行。",
                 "consumes": [
                     "application/json"
                 ],
@@ -28094,6 +28094,12 @@ const docTemplate = `{
                 "faq_score_boost": {
                     "description": "FAQ score boost multiplier - FAQ results score multiplied by this factor",
                     "type": "number"
+                },
+                "gateway_tool_policy": {
+                    "description": "===== Model Gateway Settings =====\nGatewayToolPolicy narrows what a gateway (OpenAI-compat) run of this\nagent may use (M3-1/M3-2). Empty or \"all\": internal tools plus the\ncaller's client tools; \"client_only\": client tools only; \"none\":\nclient tool definitions are ignored (M1 behavior). Frozen into the\npublish snapshot like every other config field.",
+                    "type": "string",
+                    "x-agent": true,
+                    "x-agent-detail": true
                 },
                 "history_turns": {
                     "description": "Number of history turns to keep in context. Quick-answer only; smart-reasoning sizes history by context window",
@@ -40289,6 +40295,17 @@ const docTemplate = `{
                     "type": "string",
                     "x-agent": true
                 },
+                "gateway_tool_policy": {
+                    "description": "GatewayToolPolicy selects what the gateway exposes to callers of the\npublished model (M3-1): \"\"/\"all\" runs internal and bridged client\ntools, \"client_only\" hides internal tools, \"none\" restores M1 behavior\n(tools[] ignored and counted). Omitted keeps the stored value; the\npolicy also freezes into each publish snapshot.",
+                    "type": "string",
+                    "enum": [
+                        "",
+                        "all",
+                        "client_only",
+                        "none"
+                    ],
+                    "x-agent": true
+                },
                 "kb_selection_mode": {
                     "description": "Knowledge bases searched: all, selected (knowledge_bases) or none",
                     "type": "string",
@@ -42894,7 +42911,7 @@ const docTemplate = `{
                     "type": "object"
                 },
                 "tools": {
-                    "description": "M2: counted as ignored, never executed",
+                    "description": "Tools are the caller's Anthropic tool definitions ({name, description,\ninput_schema}); converted to function specs and bridged like the\nOpenAI shell's tools[] (gateway_tool_policy \"none\" ignores them).",
                     "type": "array",
                     "items": {
                         "type": "object"
@@ -42906,7 +42923,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "finish_reason": {
-                    "description": "\"stop\" in M1",
+                    "description": "\"stop\" | \"tool_calls\"",
                     "type": "string"
                 },
                 "index": {
@@ -42947,7 +42964,7 @@ const docTemplate = `{
                     "type": "object"
                 },
                 "tools": {
-                    "description": "Tools and ToolChoice are accepted for wire compatibility and ignored:\nM1 never executes client tools (docs §14). The count is echoed in the\nresponse meta as client_tools_ignored.",
+                    "description": "Tools declares the caller's client tools (M3-1): function tools are\nbridged into the run — the model's calls come back as\nfinish_reason=\"tool_calls\", and the next request carries tool results\nthat resume the run. gateway_tool_policy \"none\" ignores them instead\n(counted in meta.client_tools_ignored).",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/internal_handler_openai_compat.ClientToolDefinition"
@@ -43080,8 +43097,12 @@ const docTemplate = `{
                     "description": "AgentID is the resolved agent UUID.",
                     "type": "string"
                 },
+                "bridge_pending": {
+                    "description": "BridgePending marks a finish_reason=\"tool_calls\" response (M3-1): the\nrun is suspended until the caller returns tool results carrying the\nsame call IDs.",
+                    "type": "boolean"
+                },
                 "client_tools_ignored": {
-                    "description": "ClientToolsIgnored counts received-but-not-executed client tools.",
+                    "description": "ClientToolsIgnored counts received-but-not-bridged client tools (only\nset when the agent's gateway_tool_policy is \"none\").",
                     "type": "integer"
                 },
                 "ignored_params": {
@@ -43259,6 +43280,13 @@ const docTemplate = `{
                 "role": {
                     "description": "\"assistant\"",
                     "type": "string"
+                },
+                "tool_calls": {
+                    "description": "ToolCalls is set on M3-1 bridge responses (finish_reason\n\"tool_calls\"): the calls the client must execute and return.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_handler_openai_compat.ClientToolCall"
+                    }
                 }
             }
         },

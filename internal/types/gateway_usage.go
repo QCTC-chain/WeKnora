@@ -24,8 +24,8 @@ type GatewayUsage struct {
 	// EndReason mirrors the audit vocabulary:
 	// completed | error | timeout | disconnect | disconnect_run_completed |
 	// budget_exceeded | rejected.
-	EndReason  string `json:"end_reason" gorm:"type:varchar(32);not null;default:''"`
-	StatusCode int    `json:"status_code" gorm:"not null;default:200"`
+	EndReason  string    `json:"end_reason" gorm:"type:varchar(32);not null;default:''"`
+	StatusCode int       `json:"status_code" gorm:"not null;default:200"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
@@ -36,11 +36,11 @@ func (GatewayUsage) TableName() string { return "gateway_usage" }
 // computed from gateway_usage for cost visibility and export.
 type GatewayUsageDay struct {
 	// Day is the UTC date in YYYY-MM-DD form.
-	Day             string `json:"day"`
-	AgentID         string `json:"agent_id"`
-	Requests        int64  `json:"requests"`
-	PromptTokens    int64  `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	TotalTokens     int64  `json:"total_tokens"`
-	AvgDurationMS   int64  `json:"avg_duration_ms"`
+	Day              string `json:"day"`
+	AgentID          string `json:"agent_id"`
+	Requests         int64  `json:"requests"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	TotalTokens      int64  `json:"total_tokens"`
+	AvgDurationMS    int64  `json:"avg_duration_ms"`
 }

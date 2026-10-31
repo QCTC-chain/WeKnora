@@ -82,7 +82,7 @@ const SessionKindAgentDelegated = "agent_delegated"
 
 // SessionKindGateway marks one-shot sessions created by the OpenAI-compatible
 // model gateway (/v1/chat/completions): one per request, kept for audit and
-// pruned by the retention task. The repository's kind='' filters already
+// pruned by the retention task. The repository's kind=” filters already
 // keep it out of ordinary listings, so no migration is needed.
 const SessionKindGateway = "gateway"
 

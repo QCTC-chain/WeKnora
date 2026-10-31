@@ -36,6 +36,14 @@
         <ApiIntegrationSettings />
       </div>
 
+      <div v-if="tab === 'gateway'" class="section">
+        <div class="section-header">
+          <h2>{{ $t('integrations.gateway.title') }}</h2>
+          <p class="section-description">{{ $t('integrations.gateway.description') }}</p>
+        </div>
+        <GatewayAgentPublishSettings />
+      </div>
+
       <div v-if="tab === 'mcpserver'" class="section">
         <div class="section-header">
           <h2>{{ $t('integrations.mcpserver.title') }}</h2>
@@ -58,6 +66,7 @@ import IMChannelPanel from '@/components/IMChannelPanel.vue'
 import AgentEmbedChannelPanel from '@/components/AgentEmbedChannelPanel.vue'
 import ApiIntegrationSettings from '@/views/integrations/ApiIntegrationSettings.vue'
 import McpServerIntegrationSettings from '@/views/integrations/McpServerIntegrationSettings.vue'
+import GatewayAgentPublishSettings from '@/views/integrations/GatewayAgentPublishSettings.vue'
 import ChromeExtensionLanding from '@/views/integrations/ChromeExtensionLanding.vue'
 import ClawSkillLanding from '@/views/integrations/ClawSkillLanding.vue'
 import CliIntegrationLanding from '@/views/integrations/CliIntegrationLanding.vue'

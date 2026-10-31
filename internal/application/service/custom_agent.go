@@ -35,6 +35,7 @@ var (
 	// future — publishing an already-expired sunset would resolve as
 	// unpublished on the next request and only confuse callers.
 	ErrInvalidGatewaySunset = errors.New("deprecation_sunset must be in the future")
+	ErrInvalidGatewayPolicy = errors.New("gateway_tool_policy must be all, client_only or none")
 )
 
 const (
@@ -372,6 +373,9 @@ func (s *customAgentService) SetAgentPublished(
 	if upd.Sunset != nil && !upd.Sunset.After(time.Now()) {
 		return nil, ErrInvalidGatewaySunset
 	}
+	if upd.Policy != nil && !types.ValidGatewayToolPolicy(*upd.Policy) {
+		return nil, ErrInvalidGatewayPolicy
+	}
 	existing, err := s.repo.GetAgentByID(ctx, id, tenantID)
 	if err != nil {
 		if errors.Is(err, repository.ErrCustomAgentNotFound) {
@@ -383,7 +387,11 @@ func (s *customAgentService) SetAgentPublished(
 		return nil, ErrCannotModifyBuiltin
 	}
 
-	scopeChanged, sunsetChanged := false, false
+	scopeChanged, sunsetChanged, policyChanged := false, false, false
+	if upd.Policy != nil && *upd.Policy != existing.Config.GatewayToolPolicy {
+		existing.Config.GatewayToolPolicy = *upd.Policy
+		policyChanged = true
+	}
 	if upd.Scope != nil && *upd.Scope != existing.GatewayScope {
 		existing.GatewayScope = *upd.Scope
 		scopeChanged = true
@@ -431,7 +439,7 @@ func (s *customAgentService) SetAgentPublished(
 		}
 		publishApplied = true
 	}
-	if !publishApplied && !scopeChanged && !sunsetChanged {
+	if !publishApplied && !scopeChanged && !sunsetChanged && !policyChanged {
 		// Idempotent no-op: still return the current row so callers always
 		// get the agent the flags now (already) point at.
 		return existing, nil
@@ -443,8 +451,8 @@ func (s *customAgentService) SetAgentPublished(
 	}
 	switch {
 	case publishApplied && existing.Published:
-		logger.Infof(ctx, "Agent published for model gateway, ID: %s version=%d scope=%s",
-			id, existing.GatewayVersion, existing.EffectiveGatewayScope())
+		logger.Infof(ctx, "Agent published for model gateway, ID: %s version=%d scope=%s tool_policy=%s",
+			id, existing.GatewayVersion, existing.EffectiveGatewayScope(), existing.Config.GatewayToolPolicy)
 	case publishApplied:
 		logger.Infof(ctx, "Agent unpublished from model gateway, ID: %s", id)
 	default:

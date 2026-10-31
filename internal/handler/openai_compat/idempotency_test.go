@@ -102,7 +102,7 @@ func serveIdempotent(
 		&fakeAgentService{agents: []*types.CustomAgent{
 			gatewayAgent("agt-1", "Doc QA", types.GatewayScopeTenant, "u1"),
 		}},
-		&fakeGatewaySessions{script: answerScript}, &fakeGatewayMessages{}, nil, nil, nil, store, nil)
+		&fakeGatewaySessions{script: answerScript}, &fakeGatewayMessages{}, nil, nil, nil, store, nil, nil)
 	router.POST("/v1/chat/completions", func(c *gin.Context) {
 		ctx := c.Request.Context()
 		ctx = context.WithValue(ctx, types.UserIDContextKey, "user-1")

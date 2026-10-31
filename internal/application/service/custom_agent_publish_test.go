@@ -353,3 +353,42 @@ func TestSetAgentPublishedSnapshotIsDeepCopy(t *testing.T) {
 		t.Fatalf("snapshot shares state with live config: %+v", got.GatewayEffectiveConfig())
 	}
 }
+
+func TestSetAgentPublishedPolicyFreezesIntoSnapshot(t *testing.T) {
+	repo := &publishFakeRepo{agents: map[string]*types.CustomAgent{}, list: nil}
+	agent := &types.CustomAgent{ID: "a1", Name: "Doc QA", TenantID: 1}
+	repo.agents["a1"] = agent
+	svc := publishService(repo)
+
+	policy := types.GatewayToolPolicyClientOnly
+	got, err := svc.SetAgentPublished(publishCtx(), "a1", types.GatewayPublishUpdate{
+		PublishSet: true, Published: true, Policy: &policy,
+	})
+	if err != nil {
+		t.Fatalf("publish with policy: %v", err)
+	}
+	if got.Config.GatewayToolPolicy != types.GatewayToolPolicyClientOnly {
+		t.Fatalf("live config policy = %q, want client_only", got.Config.GatewayToolPolicy)
+	}
+	if got.GatewaySnapshot == nil || got.GatewaySnapshot.GatewayToolPolicy != types.GatewayToolPolicyClientOnly {
+		t.Fatalf("publish snapshot must freeze the tool policy, got %+v", got.GatewaySnapshot)
+	}
+
+	// A policy flip without re-publishing is allowed (governance-only).
+	none := types.GatewayToolPolicyNone
+	got, err = svc.SetAgentPublished(publishCtx(), "a1", types.GatewayPublishUpdate{Policy: &none})
+	if err != nil {
+		t.Fatalf("policy-only update: %v", err)
+	}
+	if got.Config.GatewayToolPolicy != types.GatewayToolPolicyNone {
+		t.Fatalf("policy-only update ignored: %q", got.Config.GatewayToolPolicy)
+	}
+	if repo.agents["a1"].GatewayVersion != 1 {
+		t.Fatalf("policy-only update must not bump the version, got %d", repo.agents["a1"].GatewayVersion)
+	}
+
+	bad := "sometimes"
+	if _, err := svc.SetAgentPublished(publishCtx(), "a1", types.GatewayPublishUpdate{Policy: &bad}); err != ErrInvalidGatewayPolicy {
+		t.Fatalf("invalid policy error = %v, want ErrInvalidGatewayPolicy", err)
+	}
+}

@@ -2955,6 +2955,17 @@ definitions:
         description: FAQ score boost multiplier - FAQ results score multiplied by
           this factor
         type: number
+      gateway_tool_policy:
+        description: |-
+          ===== Model Gateway Settings =====
+          GatewayToolPolicy narrows what a gateway (OpenAI-compat) run of this
+          agent may use (M3-1/M3-2). Empty or "all": internal tools plus the
+          caller's client tools; "client_only": client tools only; "none":
+          client tool definitions are ignored (M1 behavior). Frozen into the
+          publish snapshot like every other config field.
+        type: string
+        x-agent: true
+        x-agent-detail: true
       history_turns:
         description: Number of history turns to keep in context. Quick-answer only;
           smart-reasoning sizes history by context window
@@ -12515,6 +12526,20 @@ definitions:
         description: What the agent is for
         type: string
         x-agent: true
+      gateway_tool_policy:
+        description: |-
+          GatewayToolPolicy selects what the gateway exposes to callers of the
+          published model (M3-1): ""/"all" runs internal and bridged client
+          tools, "client_only" hides internal tools, "none" restores M1 behavior
+          (tools[] ignored and counted). Omitted keeps the stored value; the
+          policy also freezes into each publish snapshot.
+        enum:
+        - ""
+        - all
+        - client_only
+        - none
+        type: string
+        x-agent: true
       kb_selection_mode:
         description: 'Knowledge bases searched: all, selected (knowledge_bases) or
           none'
@@ -14370,7 +14395,10 @@ definitions:
         description: string | [{type:"text",text}]
         type: object
       tools:
-        description: 'M2: counted as ignored, never executed'
+        description: |-
+          Tools are the caller's Anthropic tool definitions ({name, description,
+          input_schema}); converted to function specs and bridged like the
+          OpenAI shell's tools[] (gateway_tool_policy "none" ignores them).
         items:
           type: object
         type: array
@@ -14378,7 +14406,7 @@ definitions:
   internal_handler_openai_compat.ChatCompletionChoice:
     properties:
       finish_reason:
-        description: '"stop" in M1'
+        description: '"stop" | "tool_calls"'
         type: string
       index:
         type: integer
@@ -14412,9 +14440,11 @@ definitions:
         type: object
       tools:
         description: |-
-          Tools and ToolChoice are accepted for wire compatibility and ignored:
-          M1 never executes client tools (docs §14). The count is echoed in the
-          response meta as client_tools_ignored.
+          Tools declares the caller's client tools (M3-1): function tools are
+          bridged into the run — the model's calls come back as
+          finish_reason="tool_calls", and the next request carries tool results
+          that resume the run. gateway_tool_policy "none" ignores them instead
+          (counted in meta.client_tools_ignored).
         items:
           $ref: '#/definitions/internal_handler_openai_compat.ClientToolDefinition'
         type: array
@@ -14508,8 +14538,16 @@ definitions:
       agent_id:
         description: AgentID is the resolved agent UUID.
         type: string
+      bridge_pending:
+        description: |-
+          BridgePending marks a finish_reason="tool_calls" response (M3-1): the
+          run is suspended until the caller returns tool results carrying the
+          same call IDs.
+        type: boolean
       client_tools_ignored:
-        description: ClientToolsIgnored counts received-but-not-executed client tools.
+        description: |-
+          ClientToolsIgnored counts received-but-not-bridged client tools (only
+          set when the agent's gateway_tool_policy is "none").
         type: integer
       ignored_params:
         description: IgnoredParams echoes the sampling params the gateway dropped.
@@ -14646,6 +14684,13 @@ definitions:
       role:
         description: '"assistant"'
         type: string
+      tool_calls:
+        description: |-
+          ToolCalls is set on M3-1 bridge responses (finish_reason
+          "tool_calls"): the calls the client must execute and return.
+        items:
+          $ref: '#/definitions/internal_handler_openai_compat.ClientToolCall'
+        type: array
     type: object
   internal_handler_openai_compat.StreamOptions:
     properties:
@@ -29886,8 +29931,11 @@ paths:
         OpenAI 兼容端点:把一次 chat/completions 请求作为单轮提问发给
         指定的已发布智能体。messages 数组整体折叠为一轮 query(调用方指令 +
         对话历史 + 本次问题),每次调用创建 Kind=gateway 的临时会话,
-        跑完留在库中供审计(默认 72h 后由回收任务清理)。M1 不执行客户端
-        tools;temperature 等采样参数以智能体配置为准。
+        跑完留在库中供审计(默认 72h 后由回收任务清理)。tools[] 中的
+        function 定义按智能体 gateway_tool_policy 处理:默认桥接为客户端
+        工具(模型调用时以 finish_reason="tool_calls" 挂起,续轮带 tool
+        消息恢复运行),策略为 none 时计数忽略并回显 meta.client_tools_ignored;
+        temperature 等采样参数以智能体配置为准。
         stream=true 走 SSE(chat.completion.chunk + [DONE]),
         首个内容前每 15s 输出 keep-alive 注释行;stream=false 聚合返回。
         每 key 并发默认上限 3,超限立即 429(concurrency_limit)。
@@ -29931,8 +29979,10 @@ paths:
     post:
       consumes:
       - application/json
-      description: 以 Anthropic Messages 协议调用已发布的智能体(system/messages/content blocks,SSE
-        事件流)
+      description: |-
+        以 Anthropic Messages 协议调用已发布的智能体(system/messages/content blocks,SSE 事件流)。
+        tools(input_schema)按智能体 gateway_tool_policy 桥接:模型调用时返回
+        stop_reason="tool_use" + tool_use 块,续轮以 tool_result 块恢复运行。
       parameters:
       - description: Anthropic Messages 请求
         in: body

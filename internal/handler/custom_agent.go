@@ -105,6 +105,9 @@ func (h *CustomAgentHandler) auditGatewayPublishChange(
 	if upd.SunsetClear {
 		details["sunset_cleared"] = true
 	}
+	if upd.Policy != nil {
+		details["gateway_tool_policy"] = *upd.Policy
+	}
 	userID, _ := types.UserIDFromContext(ctx)
 	detailsRaw, _ := json.Marshal(details)
 	entry := &types.AuditLog{
@@ -187,6 +190,12 @@ type PatchAgentRequest struct {
 	// JSON null clears an existing sunset. Requires the sunset to be in the
 	// future when set alongside publish.
 	DeprecationSunset json.RawMessage `json:"deprecation_sunset" swaggertype:"string" format:"date-time" extensions:"x-agent"`
+	// GatewayToolPolicy selects what the gateway exposes to callers of the
+	// published model (M3-1): ""/"all" runs internal and bridged client
+	// tools, "client_only" hides internal tools, "none" restores M1 behavior
+	// (tools[] ignored and counted). Omitted keeps the stored value; the
+	// policy also freezes into each publish snapshot.
+	GatewayToolPolicy *string `json:"gateway_tool_policy" enums:",all,client_only,none" extensions:"x-agent"`
 }
 
 // publishOnly reports whether the request touches only gateway publish
@@ -202,6 +211,14 @@ func (p PatchAgentRequest) publishOnly() bool {
 		p.MultiTurnEnabled == nil
 }
 
+// applyPublishPatch reports whether any publish-governance field is present
+// (including the M3-1 tool policy, which rides the governance path so a
+// policy flip never re-validates unrelated config).
+func (p PatchAgentRequest) applyPublishPatch() bool {
+	return p.Published != nil || p.PublishedScope != nil ||
+		p.DeprecationSunset != nil || p.GatewayToolPolicy != nil
+}
+
 // gatewayPublishUpdate maps the PATCH fields onto the service-level publish
 // update. deprecation_sunset decodes from JSON directly so null (clear) and
 // an absent field (keep) stay distinguishable.
@@ -212,6 +229,7 @@ func (p PatchAgentRequest) gatewayPublishUpdate() (types.GatewayPublishUpdate, e
 		upd.Published = *p.Published
 	}
 	upd.Scope = p.PublishedScope
+	upd.Policy = p.GatewayToolPolicy
 	if len(p.DeprecationSunset) > 0 {
 		trimmed := trimJSONSpace(p.DeprecationSunset)
 		if string(trimmed) == "null" {
@@ -687,7 +705,7 @@ func (h *CustomAgentHandler) PatchAgent(c *gin.Context) {
 	// invariant "publish exposes the last saved config". A publish conflict
 	// (409) aborts before any config change is attempted.
 	var publishedAgent *types.CustomAgent
-	if patch.Published != nil || patch.PublishedScope != nil || len(patch.DeprecationSunset) > 0 {
+	if patch.applyPublishPatch() {
 		upd, updErr := patch.gatewayPublishUpdate()
 		if updErr != nil {
 			_ = c.Error(updErr)
@@ -714,6 +732,9 @@ func (h *CustomAgentHandler) PatchAgent(c *gin.Context) {
 			case service.ErrInvalidGatewaySunset:
 				_ = c.Error(errors.NewBadRequestError(
 					"deprecation_sunset must be an RFC3339 instant in the future"))
+			case service.ErrInvalidGatewayPolicy:
+				_ = c.Error(errors.NewBadRequestError(
+					"gateway_tool_policy must be all, client_only or none"))
 			default:
 				_ = c.Error(errors.NewInternalServerError("Failed to update agent"))
 			}
@@ -721,7 +742,7 @@ func (h *CustomAgentHandler) PatchAgent(c *gin.Context) {
 		}
 		h.auditGatewayPublishChange(ctx, id, publishedAgent, upd, patch.Published != nil)
 	}
-	if patch.Published != nil && patch.publishOnly() {
+	if patch.publishOnly() {
 		c.JSON(http.StatusOK, gin.H{"success": true, "data": publishedAgent})
 		return
 	}

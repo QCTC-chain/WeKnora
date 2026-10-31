@@ -61,7 +61,7 @@ func newGatewayTestRouter(t *testing.T, key *types.TenantAPIKey) *gin.Engine {
 		ID: "agt-1", Name: "Doc QA", TenantID: 42, Published: true,
 	}}}
 	r := gin.New()
-	RegisterOpenAICompatRoutes(r, openai_compat.NewGatewayHandler(agents, nil, nil, nil, nil, nil, nil, nil), fakes, fakes, fakes)
+	RegisterOpenAICompatRoutes(r, openai_compat.NewGatewayHandler(agents, nil, nil, nil, nil, nil, nil, nil, nil), fakes, fakes, fakes)
 	return r
 }
 

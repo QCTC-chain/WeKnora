@@ -44,8 +44,11 @@ var ignoredSamplingParams = []string{"temperature", "top_p", "max_tokens", "reas
 // @Description  OpenAI 兼容端点:把一次 chat/completions 请求作为单轮提问发给
 // @Description  指定的已发布智能体。messages 数组整体折叠为一轮 query(调用方指令 +
 // @Description  对话历史 + 本次问题),每次调用创建 Kind=gateway 的临时会话,
-// @Description  跑完留在库中供审计(默认 72h 后由回收任务清理)。M1 不执行客户端
-// @Description  tools;temperature 等采样参数以智能体配置为准。
+// @Description  跑完留在库中供审计(默认 72h 后由回收任务清理)。tools[] 中的
+// @Description  function 定义按智能体 gateway_tool_policy 处理:默认桥接为客户端
+// @Description  工具(模型调用时以 finish_reason="tool_calls" 挂起,续轮带 tool
+// @Description  消息恢复运行),策略为 none 时计数忽略并回显 meta.client_tools_ignored;
+// @Description  temperature 等采样参数以智能体配置为准。
 // @Description  stream=true 走 SSE(chat.completion.chunk + [DONE]),
 // @Description  首个内容前每 15s 输出 keep-alive 注释行;stream=false 聚合返回。
 // @Description  每 key 并发默认上限 3,超限立即 429(concurrency_limit)。
@@ -129,11 +132,31 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 		return
 	}
 
+	// M3-1 client-tool bridge (design doc agent-model-gateway-m2-m3.md §7):
+	// policy "none" keeps the M1 behavior (tools ignored); otherwise the
+	// caller's function tools are bridged into the run, and a follow-up
+	// whose tool messages carry gateway call IDs resumes the suspended run
+	// instead of starting a new turn.
+	bridgeEnabled := agent.Config.GatewayToolPolicy != "none"
+	clientTools, toolErr := validateClientTools(req.Tools)
+	if toolErr != nil {
+		writeProtoParam(c, proto, http.StatusBadRequest, "tools", toolErr.Error())
+		return
+	}
+	if !bridgeEnabled {
+		clientTools = nil
+	}
+	if bridgeEnabled && hasBridgeToolMessages(req.Messages) {
+		h.resumeToolBridge(c, proto, tenantID, agent, req, started)
+		return
+	}
+
 	turn, err := renderMessages(req.Messages, agent.Config.ImageUploadEnabled)
 	if err != nil {
 		writeProtoParam(c, proto, http.StatusBadRequest, "messages", err.Error())
 		return
 	}
+	turn.ClientTools = clientTools
 
 	// Per-key concurrency (docs §9): over-limit requests answer 429
 	// immediately, before any session or message rows are created.
@@ -213,7 +236,7 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 		AgentID:       agent.ID,
 		SessionID:     session.ID,
 	}
-	if len(req.Tools) > 0 {
+	if !bridgeEnabled && len(req.Tools) > 0 {
 		meta.ClientToolsIgnored = len(req.Tools)
 	}
 
@@ -243,7 +266,7 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 	if req.Stream {
 		stream := protoStream(c, proto, req.Model)
 		stream.setHeaders(agent.ID, session.ID)
-		endReason, usage, telemetry := h.runGatewayTurnStream(ctx, session, agent, turn, stream)
+		endReason, usage, telemetry := h.runGatewayTurnStream(ctx, session, agent, turn, stream, nil, nil)
 		auditBase.EndReason = endReason
 		auditBase.Usage = usage
 		auditBase.Telemetry = telemetry
@@ -257,7 +280,7 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 		return
 	}
 
-	outcome := h.runGatewayTurn(ctx, session, agent, turn)
+	outcome := h.runGatewayTurn(ctx, session, agent, turn, nil, nil)
 	auditBase.Telemetry = outcome.telemetry
 	if outcome.err != nil {
 		auditBase.EndReason = "error"
@@ -277,6 +300,15 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 	auditBase.Usage = outcome.usage
 	auditBase.Duration = time.Since(started)
 	observeTurnMetrics(proto, outcome.usage, outcome.telemetry, started)
+	if outcome.bridge != nil {
+		// M3-1: the run suspended on client tools; answer tool_calls and
+		// leave the assistant message open (it is awaiting input).
+		auditBase.EndReason = FinishToolCalls
+		meta.BridgePending = true
+		h.auditGatewayTurn(ctx, auditBase)
+		h.writeBridgeResponse(c, proto, req.Model, outcome, meta)
+		return
+	}
 	h.auditGatewayTurn(ctx, auditBase)
 
 	if proto == protoAnthropic {
@@ -345,6 +377,9 @@ type turnOutcome struct {
 	err       error
 	timedOut  bool
 	telemetry *turnTelemetry
+	// bridge is set when the run suspended on client-tool calls (M3-1);
+	// the response becomes finish_reason "tool_calls" instead.
+	bridge *bridgeSuspension
 }
 
 // runGatewayTurn creates the message rows, drives SessionService.AgentQA to
@@ -353,9 +388,10 @@ type turnOutcome struct {
 // (internal/mcpserver/tools_ask.go runQA) — same service entry, same
 // unattended semantics, TurnLeaseHeld=false.
 func (h *GatewayHandler) runGatewayTurn(
-	ctx context.Context, session *types.Session, agent *types.CustomAgent, turn *renderedTurn,
+	ctx context.Context, session *types.Session, agent *types.CustomAgent,
+	turn *renderedTurn, tm *turnMessages, qa *types.QARequest,
 ) turnOutcome {
-	userMsg, assistantMsg, err := h.createTurnMessages(ctx, session, turn)
+	userMsg, assistantMsg, err := h.createTurnMessages(ctx, session, turn, tm)
 	if err != nil {
 		return turnOutcome{err: err}
 	}
@@ -369,10 +405,15 @@ func (h *GatewayHandler) runGatewayTurn(
 		qaErr       error
 		promptNote  string
 		rounds      int
-		done        = make(chan struct{})
-		complete    = make(chan struct{})
-		doneOnce    sync.Once
-		compOnce    sync.Once
+		// M3-1 bridge capture: the external_tool_call prompt the run raised
+		// plus the suspension event confirming the run parked on it.
+		bridgePrompt   *types.ExternalToolCallPromptRequest
+		bridgePromptID string
+		bridgeSuspend  *types.PromptSuspension
+		done           = make(chan struct{})
+		complete       = make(chan struct{})
+		doneOnce       sync.Once
+		compOnce       sync.Once
 	)
 	closeDone := func() { doneOnce.Do(func() { close(done) }) }
 	closeComplete := func() { compOnce.Do(func() { close(complete) }) }
@@ -437,16 +478,32 @@ func (h *GatewayHandler) runGatewayTurn(
 		mu.Unlock()
 		return nil
 	})
-	// Unattended runs should never surface a prompt request (Mode=""), but a
-	// defensive fold keeps the turn alive if the engine emits one anyway.
 	bus.On(event.EventAgentPromptRequired, func(_ context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.AgentPromptRequiredData)
 		if !ok {
 			return nil
 		}
 		mu.Lock()
-		promptNote = fmt.Sprintf("[提示] 智能体请求人工输入(%s),网关以无人值守模式继续。", data.Kind)
+		if data.Kind == types.AgentPromptKindExternalToolCall {
+			// M3-1: a client-tool call the gateway forwards to the caller.
+			if req, err := decodeBridgePromptRequest(data.Request); err == nil {
+				bridgePrompt = req
+				bridgePromptID = data.PendingID
+			}
+		} else {
+			promptNote = fmt.Sprintf("[提示] 智能体请求人工输入(%s),网关以无人值守模式继续。", data.Kind)
+		}
 		mu.Unlock()
+		return nil
+	})
+	bus.On(event.EventAgentComplete, func(_ context.Context, evt event.Event) error {
+		if data, ok := evt.Data.(event.AgentCompleteData); ok {
+			if susp, ok := data.Suspended.(*types.PromptSuspension); ok && susp != nil {
+				mu.Lock()
+				bridgeSuspend = susp
+				mu.Unlock()
+			}
+		}
 		return nil
 	})
 
@@ -469,7 +526,7 @@ func (h *GatewayHandler) runGatewayTurn(
 		closeComplete()
 		mu.Unlock()
 	}
-	qaFinished := h.launchAgentQA(runCtx, session, agent, turn, userMsg, assistantMsg, bus, onReturn)
+	qaFinished := h.launchAgentQA(runCtx, session, agent, turn, userMsg, assistantMsg, bus, onReturn, qa)
 
 	timedOut := false
 	select {
@@ -500,7 +557,23 @@ func (h *GatewayHandler) runGatewayTurn(
 	collected := refs
 	runErr := qaErr
 	note := promptNote
+	var bridge *bridgeSuspension
+	if bridgeSuspend != nil && bridgePrompt != nil &&
+		bridgeSuspend.PromptID == bridgePromptID && bridgePromptID != "" {
+		bridge = &bridgeSuspension{
+			PromptID:  bridgePromptID,
+			Calls:     bridgePrompt.Calls,
+			ExpiresAt: bridgeSuspend.ExpiresAt,
+		}
+	}
 	mu.Unlock()
+
+	if bridge != nil {
+		// M3-1: no answer text is owed; the tool_calls response ends this
+		// request. The assistant message stays open (awaiting input).
+		return turnOutcome{usage: usage, bridge: bridge,
+			telemetry: &turnTelemetry{Rounds: rounds}}
+	}
 
 	if strings.TrimSpace(text) == "" && note != "" {
 		text = note
@@ -545,8 +618,24 @@ const askCompleteWait = 30 * time.Second
 // createTurnMessages persists the user + assistant rows of one gateway turn.
 // Both completions paths (aggregate and stream) share this pair.
 func (h *GatewayHandler) createTurnMessages(
-	ctx context.Context, session *types.Session, turn *renderedTurn,
+	ctx context.Context, session *types.Session, turn *renderedTurn, tm *turnMessages,
 ) (*types.Message, *types.Message, error) {
+	if tm != nil {
+		// Resume path: the rows already exist; only the missing user row is
+		// synthesized (runs suspended before any steering message arrived).
+		if tm.user == nil && tm.assistant != nil {
+			userMsg, err := h.messages.CreateMessage(ctx, &types.Message{
+				SessionID: session.ID, Role: "user", Content: turn.Query,
+				RequestID: tm.assistant.RequestID, CreatedAt: time.Now(),
+				IsCompleted: true, Channel: gatewayChannel,
+			})
+			if err != nil {
+				return nil, nil, fmt.Errorf("create user message: %w", err)
+			}
+			tm.user = userMsg
+		}
+		return tm.user, tm.assistant, nil
+	}
 	requestID := uuid.New().String()
 	userMsg, err := h.messages.CreateMessage(ctx, &types.Message{
 		SessionID:   session.ID,
@@ -574,14 +663,16 @@ func (h *GatewayHandler) createTurnMessages(
 	return userMsg, assistantMsg, nil
 }
 
-// launchAgentQA starts the SessionService.AgentQA goroutine with the shared
-// unattended QARequest semantics (docs §7.1): TurnLeaseHeld=false so the
+// launchAgentQA starts the SessionService.AgentQA goroutine. Ordinary turns
+// use the shared unattended semantics (docs §7.1): TurnLeaseHeld=false so the
 // service takes the session lease itself, Suspendable=false, Mode="" — the
-// same shape as the IM and MCP callers. onReturn receives AgentQA's own
-// return error (bus-level failures travel as error events instead). The
-// returned channel closes when AgentQA returns — with or without events —
-// so a run that finishes silently unblocks the waiters instead of burning
-// the whole request budget.
+// same shape as the IM and MCP callers. M3-1 bridge turns (turn.ClientTools)
+// flip Suspendable on so a client-tool call can park the run for the caller;
+// the qa override (resume) replaces the built request entirely. onReturn
+// receives AgentQA's own return error (bus-level failures travel as error
+// events instead). The returned channel closes when AgentQA returns — with
+// or without events — so a run that finishes silently unblocks the waiters
+// instead of burning the whole request budget.
 func (h *GatewayHandler) launchAgentQA(
 	ctx context.Context,
 	session *types.Session,
@@ -590,27 +681,38 @@ func (h *GatewayHandler) launchAgentQA(
 	userMsg, assistantMsg *types.Message,
 	bus *event.EventBus,
 	onReturn func(error),
+	qa *types.QARequest,
 ) <-chan struct{} {
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		req := &types.QARequest{
-			Session:            session,
-			Query:              turn.Query,
-			AssistantMessageID: assistantMsg.ID,
-			UserMessageID:      userMsg.ID,
-			CustomAgent:        agent,
-			// The agent's own KB/MCP/skill selection governs; the gateway
-			// adds no scope of its own.
-			ImageURLs: turn.Images,
-			// ANDed with the agent config inside the service, so "true" here
-			// means "let the agent's own web-search setting decide".
-			WebSearchEnabled: true,
-			// One-shot unattended turn, same as IM/MCP callers: the service
-			// takes the session turn lease itself and auto-handles prompts.
-			TurnLeaseHeld: false,
-			Suspendable:   false,
-			Mode:          "",
+		var req *types.QARequest
+		if qa != nil {
+			// M3-1 resume: the caller prepared the full resumed request
+			// (Resume snapshot, frozen tools, session) already.
+			req = qa
+		} else {
+			req = &types.QARequest{
+				Session:            session,
+				Query:              turn.Query,
+				AssistantMessageID: assistantMsg.ID,
+				UserMessageID:      userMsg.ID,
+				CustomAgent:        agent,
+				// The agent's own KB/MCP/skill selection governs; the gateway
+				// adds no scope of its own.
+				ImageURLs: turn.Images,
+				// ANDed with the agent config inside the service, so "true" here
+				// means "let the agent's own web-search setting decide".
+				WebSearchEnabled: true,
+				// One-shot unattended turn, same as IM/MCP callers: the service
+				// takes the session turn lease itself and auto-handles prompts.
+				TurnLeaseHeld: false,
+				Mode:          "",
+			}
+			// M3-1: a bridge turn suspends on client-tool calls instead of
+			// answering them itself.
+			req.ClientTools = turn.ClientTools
+			req.Suspendable = len(turn.ClientTools) > 0
 		}
 		if runErr := h.sessions.AgentQA(ctx, req, bus); runErr != nil && onReturn != nil {
 			onReturn(runErr)

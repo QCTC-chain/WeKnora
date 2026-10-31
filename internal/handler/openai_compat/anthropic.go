@@ -36,7 +36,9 @@ const protoAnthropic = "anthropic"
 // /v1/chat/completions; only the wire protocol differs.
 //
 // @Summary      Anthropic 兼容对话
-// @Description  以 Anthropic Messages 协议调用已发布的智能体(system/messages/content blocks,SSE 事件流)
+// @Description  以 Anthropic Messages 协议调用已发布的智能体(system/messages/content blocks,SSE 事件流)。
+// @Description  tools(input_schema)按智能体 gateway_tool_policy 桥接:模型调用时返回
+// @Description  stop_reason="tool_use" + tool_use 块,续轮以 tool_result 块恢复运行。
 // @Tags         网关(Anthropic 兼容)
 // @Accept       json
 // @Produce      json
@@ -70,7 +72,10 @@ type AnthropicMessagesRequest struct {
 		// Anthropic's external user id; feeds the M2-3 derived thread key.
 		UserID string `json:"user_id,omitempty"`
 	} `json:"metadata,omitempty"`
-	Tools []json.RawMessage `json:"tools,omitempty"` // M2: counted as ignored, never executed
+	// Tools are the caller's Anthropic tool definitions ({name, description,
+	// input_schema}); converted to function specs and bridged like the
+	// OpenAI shell's tools[] (gateway_tool_policy "none" ignores them).
+	Tools []json.RawMessage `json:"tools,omitempty"`
 }
 
 // toOpenAI converts the Anthropic request into the internal completion
@@ -82,9 +87,13 @@ func (r *AnthropicMessagesRequest) toOpenAI() (*ChatCompletionRequest, error) {
 		User:   r.Metadata.UserID,
 	}
 	if len(r.Tools) > 0 {
-		// M2: tool definitions are accepted and ignored (counted in
-		// meta.ClientToolsIgnored); the tool bridge lands in M3.
-		req.Tools = make([]ClientToolDefinition, len(r.Tools))
+		// M3-1: Anthropic tool definitions bridge like OpenAI's — each
+		// {name, description, input_schema} becomes a function spec.
+		defs, err := anthropicTools(r.Tools)
+		if err != nil {
+			return nil, err
+		}
+		req.Tools = defs
 	}
 
 	if sysText, err := anthropicSystemText(r.System); err != nil {
@@ -558,6 +567,56 @@ func (s *anthropicStream) close() {
 	s.mu.Unlock()
 }
 
+// bridgeToolCalls emits one tool_use content block per client tool call
+// (M3-1); the caller streams them in model order before finishBridge.
+func (s *anthropicStream) bridgeToolCalls(calls []outboundCall) {
+	s.markTTFB()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeBlockLocked()
+	for _, call := range calls {
+		index := s.nextIndex
+		s.nextIndex++
+		s.writeEventLocked("content_block_start", map[string]any{
+			"type": "content_block_start", "index": index,
+			"content_block": map[string]any{
+				"type": "tool_use", "id": call.WireID,
+				"name": call.WireToolName(), "input": map[string]any{},
+			},
+		})
+		s.writeEventLocked("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": index,
+			"delta": map[string]any{"type": "input_json_delta", "partial_json": call.Arguments},
+		})
+		s.writeEventLocked("content_block_stop", map[string]any{
+			"type": "content_block_stop", "index": index,
+		})
+	}
+}
+
+// finishBridge closes the stream with stop_reason "tool_use".
+func (s *anthropicStream) finishBridge(usage *Usage, meta *CompletionMeta) {
+	s.mu.Lock()
+	s.closeBlockLocked()
+	s.mu.Unlock()
+	var outputTokens int64
+	if usage != nil {
+		outputTokens = usage.CompletionTokens
+	}
+	s.writeEvent("message_delta", map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": "tool_use", "stop_sequence": nil},
+		"usage": map[string]any{"output_tokens": outputTokens},
+	})
+	s.writeEvent("message_stop", map[string]any{"type": "message_stop"})
+	s.mu.Lock()
+	s.hbTarget.mu.Lock()
+	s.hbTarget.contentStarted = true
+	s.hbTarget.mu.Unlock()
+	s.streamDone = true
+	s.mu.Unlock()
+}
+
 // closed reports the terminated state; callers hold s.mu.
 func (s *anthropicStream) closed() bool { return s.streamDone }
 
@@ -617,6 +676,79 @@ func respondAnthropicMessage(c *gin.Context, model, text string, usage *Usage) {
 			"output_tokens": outputTokens,
 		},
 	})
+}
+
+// respondAnthropicBridge answers a suspended tool turn (M3-1): each pending
+// call becomes a tool_use block and stop_reason is "tool_use"; the caller's
+// next messages carry tool_result blocks with the same ids.
+func respondAnthropicBridge(
+	c *gin.Context, model, text string, calls []outboundCall, usage *Usage,
+) {
+	var inputTokens, outputTokens int64
+	if usage != nil {
+		inputTokens = usage.PromptTokens
+		outputTokens = usage.CompletionTokens
+	}
+	content := make([]map[string]any, 0, len(calls)+1)
+	if strings.TrimSpace(text) != "" {
+		content = append(content, map[string]any{"type": "text", "text": text})
+	}
+	for _, call := range calls {
+		var input map[string]any
+		if len(call.Arguments) > 0 {
+			_ = json.Unmarshal([]byte(call.Arguments), &input)
+		}
+		if input == nil {
+			input = map[string]any{}
+		}
+		content = append(content, map[string]any{
+			"type":  "tool_use",
+			"id":    call.WireID,
+			"name":  call.Name,
+			"input": input,
+		})
+	}
+	c.JSON(http.StatusOK, map[string]any{
+		"id":            "msg_" + uuid.New().String(),
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"content":       content,
+		"stop_reason":   "tool_use",
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+		},
+	})
+}
+
+// anthropicToolWire is one entry of an Anthropic tools array.
+type anthropicToolWire struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+}
+
+// anthropicTools converts the Anthropic tools array into the shared function
+// definitions the bridge validates.
+func anthropicTools(raw []json.RawMessage) ([]ClientToolDefinition, error) {
+	defs := make([]ClientToolDefinition, 0, len(raw))
+	for i, item := range raw {
+		var tool anthropicToolWire
+		if err := json.Unmarshal(item, &tool); err != nil {
+			return nil, fmt.Errorf("tools[%d]: %v", i, err)
+		}
+		defs = append(defs, ClientToolDefinition{
+			Type: "function",
+			Function: ClientToolFnSpec{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  tool.InputSchema,
+			},
+		})
+	}
+	return defs, nil
 }
 
 // anthropicErrorType maps HTTP status to the Anthropic error taxonomy.

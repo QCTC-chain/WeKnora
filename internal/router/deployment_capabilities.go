@@ -16,6 +16,9 @@ func deploymentCapabilitiesFromRouter(params RouterParams) handler.DeploymentCap
 		// Match RegisterMCPEndpointRoutes / RegisterMCPServerRoutes.
 		MCPServer: params.MCPEndpointHandler != nil && params.MCPServer != nil && params.MCPEndpointService != nil,
 		API:       params.TenantHandler != nil && params.TenantAPIKeyService != nil,
+		// Same gate as RegisterOpenAICompatRoutes (/v1 routes); nil-safe for
+		// tests that build partial RouterParams.
+		Gateway: params.Config != nil && params.Config.Gateway != nil && params.Config.Gateway.IsEnabled(),
 		MCP: params.MCPServiceHandler != nil &&
 			params.MCPCredentialsHandler != nil &&
 			params.MCPOAuthHandler != nil,

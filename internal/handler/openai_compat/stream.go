@@ -182,6 +182,12 @@ type turnStream interface {
 	errorFrame(message string)
 	// finishFrame writes the terminal frame(s) with usage + meta.
 	finishFrame(usage *Usage, meta *CompletionMeta)
+	// bridgeToolCalls emits the M3-1 client tool calls of a suspension
+	// (OpenAI delta.tool_calls / Anthropic tool_use blocks).
+	bridgeToolCalls(calls []outboundCall)
+	// finishBridge closes the stream after bridgeToolCalls with the
+	// protocol's tool-call stop reason.
+	finishBridge(usage *Usage, meta *CompletionMeta)
 	// close stops further writes (disconnect paths).
 	close()
 	// heartbeatTick emits the keep-alive (pre-content only).
@@ -205,6 +211,26 @@ func (s *sseStream) finishFrame(usage *Usage, meta *CompletionMeta) {
 	s.finish(usage, meta)
 }
 func (s *sseStream) heartbeatTick() { s.heartbeat() }
+
+// bridgeToolCalls emits one chat.completion.chunk per client tool call; the
+// caller streams them in model order before finishBridge.
+func (s *sseStream) bridgeToolCalls(calls []outboundCall) {
+	for i, call := range calls {
+		s.chunk(&Delta{ToolCalls: []OutToolCallDelta{{
+			Index: i, ID: call.WireID, Type: "function",
+			Function: &OutFnCall{Name: call.WireToolName(), Arguments: call.Arguments},
+		}}}, "", nil, nil)
+	}
+}
+
+// finishBridge closes the stream with finish_reason "tool_calls".
+func (s *sseStream) finishBridge(usage *Usage, meta *CompletionMeta) {
+	s.chunk(&Delta{}, FinishToolCalls, usage, meta)
+	s.writeFrame("data: [DONE]\n\n")
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+}
 
 // startHeartbeat runs the keep-alive ticker until stop is closed. The ticker
 // goroutine owns no state: s.heartbeat() no-ops once content started.
@@ -254,6 +280,11 @@ type streamTranslator struct {
 	startedAt time.Time
 	rounds    int
 	journal   []turnJournalEntry
+
+	// M3-1 tool bridge: the external_tool_call prompt the run raised, and
+	// whether the run actually suspended on it (complete.Suspended).
+	bridgeReq     *bridgeSuspension
+	bridgeSuspend *types.PromptSuspension
 
 	done     chan struct{} // answer finished or failure arrived
 	complete chan struct{} // complete event or failure arrived
@@ -499,6 +530,10 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 		}
 		t.rounds = data.TotalSteps
 		t.journalLocked("complete", fmt.Sprintf("rounds=%d", data.TotalSteps))
+		if susp, ok := data.Suspended.(*types.PromptSuspension); ok && susp != nil &&
+			susp.Kind == types.AgentPromptKindExternalToolCall {
+			t.bridgeSuspend = susp
+		}
 		t.closeComplete()
 		t.mu.Unlock()
 		return nil
@@ -517,11 +552,22 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 		t.mu.Unlock()
 		return nil
 	})
-	// Unattended runs auto-handle prompts; a stray one folds into a line
-	// instead of stalling the stream (docs §8 defensive rule).
+	// Unattended runs auto-handle prompts; a stray non-bridge prompt folds
+	// into a line instead of stalling the stream (docs §8 defensive rule).
+	// The M3-1 bridge prompt is captured instead: if the run suspends on it,
+	// its calls become the response's tool_calls.
 	bus.On(event.EventAgentPromptRequired, func(_ context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.AgentPromptRequiredData)
 		if !ok {
+			return nil
+		}
+		if data.Kind == types.AgentPromptKindExternalToolCall {
+			var req types.ExternalToolCallPromptRequest
+			if err := json.Unmarshal(data.Request, &req); err == nil {
+				t.mu.Lock()
+				t.bridgeReq = &bridgeSuspension{PromptID: data.PendingID, Calls: req.Calls}
+				t.mu.Unlock()
+			}
 			return nil
 		}
 		t.content(fmt.Sprintf("[提示] 智能体请求人工输入(%s),网关以无人值守模式继续。", data.Kind))
@@ -572,6 +618,20 @@ func (t *streamTranslator) snapshot() (string, []*types.SearchResult, *Usage, er
 	return text, t.refs, t.usage, t.failed
 }
 
+// bridge returns the captured suspension when the run ended waiting on the
+// external_tool_call prompt it raised, with an expiry fill-in for prompts
+// that carry none.
+func (t *streamTranslator) bridge() *bridgeSuspension {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.bridgeSuspend == nil || t.bridgeReq == nil || t.bridgeSuspend.PromptID != t.bridgeReq.PromptID {
+		return nil
+	}
+	out := *t.bridgeReq
+	out.ExpiresAt = t.bridgeSuspend.ExpiresAt
+	return &out
+}
+
 // runGatewayTurnStream is the streaming twin of runGatewayTurn: same
 // message rows, same QARequest semantics, same timeout — but agent events
 // translate to SSE frames as they arrive, a heartbeat guards the warm-up,
@@ -585,8 +645,10 @@ func (h *GatewayHandler) runGatewayTurnStream(
 	agent *types.CustomAgent,
 	turn *renderedTurn,
 	stream turnStream,
+	tm *turnMessages,
+	qa *types.QARequest,
 ) (string, *Usage, *turnTelemetry) {
-	userMsg, assistantMsg, err := h.createTurnMessages(ctx, session, turn)
+	userMsg, assistantMsg, err := h.createTurnMessages(ctx, session, turn, tm)
 	if err != nil {
 		stream.errorFrame("Failed to create gateway messages")
 		stream.finishFrame(nil, nil)
@@ -610,7 +672,7 @@ func (h *GatewayHandler) runGatewayTurnStream(
 	runCtx, cancel := context.WithTimeout(runParent, h.gateway.EffectiveRequestTimeout())
 	defer cancel()
 
-	qaFinished := h.launchAgentQA(runCtx, session, agent, turn, userMsg, assistantMsg, bus, translator.fail)
+	qaFinished := h.launchAgentQA(runCtx, session, agent, turn, userMsg, assistantMsg, bus, translator.fail, qa)
 
 	hbStop := make(chan struct{})
 	defer close(hbStop)
@@ -669,6 +731,15 @@ func (h *GatewayHandler) runGatewayTurnStream(
 		reason = "error"
 		stream.finishFrame(usage, meta)
 	default:
+		if susp := translator.bridge(); susp != nil {
+			// M3-1: the run parked on client-tool calls. Emit the tool_calls
+			// deltas, finish with reason "tool_calls", and leave the message
+			// open (awaiting input) for the follow-up results.
+			meta.BridgePending = true
+			stream.bridgeToolCalls(susp.outbound(toolBridgeKey(h.gateway), time.Now()))
+			stream.finishBridge(usage, meta)
+			return FinishToolCalls, usage, translator.telemetry()
+		}
 		if strings.TrimSpace(text) == "" {
 			text = "No answer could be produced for this question."
 			translator.content(text)

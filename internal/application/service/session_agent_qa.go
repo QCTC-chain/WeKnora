@@ -357,16 +357,28 @@ func (s *sessionService) AgentQA(
 		collaborating = bound.HasCollaboration()
 	}
 	promptSuspend := s.cfg != nil && s.cfg.Agent.PromptSuspend()
-	if req.Suspendable && (promptSuspend || collaborating) {
+	// Gateway client-tool bridge rounds (M3-1) must always be suspendable:
+	// the run ends on the external_tool_call prompt and the gateway resumes it.
+	bridgeRun := len(agentConfig.ClientTools) > 0 && agentConfig.GatewayToolPolicy != "none"
+	if req.Suspendable && (promptSuspend || collaborating || bridgeRun) {
 		if request, err := json.Marshal(resumableAgentRequest(ctx, req)); err != nil {
 			logger.Warnf(ctx, "Run cannot be suspended, encoding its request failed: %v", err)
 		} else {
 			engine.EnableSuspension(request)
 			// Scheduler-owned children always suspend on prompts: their approvals
 			// are forwarded to the parent and resumed by the scheduler.
-			if b := collaboration.FromContext(ctx); !promptSuspend && (b == nil || b.Child == nil) {
+			// Bridge runs never downgrade to collaboration-only: their tool
+			// prompts are the whole point of the run.
+			if b := collaboration.FromContext(ctx); !promptSuspend && !bridgeRun && (b == nil || b.Child == nil) {
 				if restricted, ok := engine.(interface{ RestrictSuspensionToCollaboration() }); ok {
 					restricted.RestrictSuspensionToCollaboration()
+				}
+			}
+			// M3-1: a bridge run suspends only on client-tool calls, so the
+			// gateway can hand every suspension to the API caller.
+			if bridgeRun {
+				if restricted, ok := engine.(interface{ RestrictSuspensionToClientTools() }); ok {
+					restricted.RestrictSuspensionToClientTools()
 				}
 			}
 		}
@@ -503,6 +515,7 @@ func resumableAgentRequest(ctx context.Context, req *types.QARequest) types.Resu
 		AssistantAccess:     req.AssistantAccess,
 		UserMessageID:       req.UserMessageID,
 		Language:            types.LanguageFromContextOrDefault(ctx),
+		ClientTools:         req.ClientTools,
 	}
 	if req.CustomAgent != nil {
 		r.AgentID, r.AgentTenantID = req.CustomAgent.ID, req.CustomAgent.TenantID
@@ -546,6 +559,10 @@ func (s *sessionService) buildAgentConfig(
 		RetainRetrievalHistory:        customAgent.Config.RetainRetrievalHistory,
 		SharedAgentReadOnly:           req.SharedAgentReadOnly,
 		AssistantAccess:               types.CapAccessLevel(req.AssistantAccess, customAgent.Config.AccessLevel),
+		// Gateway client-tool passthrough (M3-1): the caller's tool
+		// definitions and the agent's gateway tool policy are runtime-only.
+		GatewayToolPolicy: customAgent.Config.GatewayToolPolicy,
+		ClientTools:       req.ClientTools,
 		// The model is always told it may call tools in parallel; without
 		// this the engine still ran them one by one, so three searches in
 		// one reply cost three sequential embed/retrieve/rerank rounds.

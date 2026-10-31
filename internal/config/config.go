@@ -119,6 +119,11 @@ type GatewayConfig struct {
 	// budgets live on the API key rows. Env override:
 	// GATEWAY_TENANT_DAILY_TOKEN_BUDGET.
 	TenantDailyTokenBudget int64 `yaml:"tenant_daily_token_budget" json:"tenant_daily_token_budget"`
+	// ToolBridgeSecret keys the HMAC stamped into bridged tool-call IDs
+	// (M3-1). Empty falls back to a built-in pepper; the broker still
+	// re-validates tenant/kind/expiry on every resume. Env override:
+	// GATEWAY_TOOL_BRIDGE_SECRET.
+	ToolBridgeSecret string `yaml:"tool_bridge_secret" json:"-"`
 }
 
 // Gateway defaults (docs design/agent-model-gateway-m1.md §9/§10).
@@ -130,11 +135,15 @@ const (
 	DefaultGatewayThoughtMode       = "reasoning"
 	DefaultGatewayProgressMode      = "text"
 	DefaultGatewayPathPrefix        = "/v1"
-	GatewayThoughtModeReasoning     = "reasoning"
-	GatewayThoughtModeCollapse      = "collapse"
-	GatewayThoughtModeDrop          = "drop"
-	GatewayProgressModeText         = "text"
-	GatewayProgressModeDrop         = "drop"
+	// DefaultGatewaySuspendGrace bounds a bridged tool-call ID when the
+	// prompt itself carries no expiry, aligned with the gateway session
+	// retention so both sides lapse together.
+	DefaultGatewaySuspendGrace  = 72 * time.Hour
+	GatewayThoughtModeReasoning = "reasoning"
+	GatewayThoughtModeCollapse  = "collapse"
+	GatewayThoughtModeDrop      = "drop"
+	GatewayProgressModeText     = "text"
+	GatewayProgressModeDrop     = "drop"
 )
 
 // EffectiveTenantDailyTokenBudget returns the tenant-level daily total
@@ -1082,6 +1091,18 @@ func applyGatewayEnvOverrides(cfg *Config) {
 			gateway.TenantDailyTokenBudget = n
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_TOOL_BRIDGE_SECRET")); value != "" {
+		gateway.ToolBridgeSecret = value
+	}
+}
+
+// EffectiveToolBridgeSecret returns the configured tool-bridge HMAC key,
+// nil-safe, empty = built-in pepper.
+func (g *GatewayConfig) EffectiveToolBridgeSecret() string {
+	if g == nil {
+		return ""
+	}
+	return g.ToolBridgeSecret
 }
 
 // gatewayTruthy is the shared truthy vocabulary for gateway env flags.

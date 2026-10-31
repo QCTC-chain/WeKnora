@@ -198,10 +198,24 @@ func (e *AgentEngine) RestrictSuspensionToCollaboration() {
 	e.collaborationOnlySuspension = true
 }
 
+// RestrictSuspensionToClientTools marks a gateway client-tool bridge run
+// (M3-1): only client-tool calls may suspend it, so every suspension the
+// gateway sees is an external_tool_call it can hand to the API caller.
+func (e *AgentEngine) RestrictSuspensionToClientTools() {
+	e.clientToolSuspensionOnly = true
+}
+
 // snapshotFunc returns the ToolExecContext.Snapshot hook for call i, or nil
 // when this call cannot suspend the run.
 func (e *AgentEngine) snapshotFunc(i int, toolName string) func() ([]byte, int, error) {
 	if !e.suspendable || (e.collaborationOnlySuspension && toolName != "wait_agent") {
+		return nil
+	}
+	// Gateway client-tool bridge runs (M3-1): only client tools may suspend
+	// the run. Every other prompt kind keeps the caller's semantics
+	// (unattended gateway runs refuse them at once), so a suspension is
+	// always an external_tool_call the gateway can hand to the API caller.
+	if e.clientToolSuspensionOnly && !e.toolRegistry.IsClientTool(toolName) {
 		return nil
 	}
 	return func() ([]byte, int, error) {

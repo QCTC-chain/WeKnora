@@ -82,9 +82,11 @@ type ChatCompletionRequest struct {
 	// StreamOptions is accepted for wire compatibility; only include_usage
 	// matters and usage is always included.
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
-	// Tools and ToolChoice are accepted for wire compatibility and ignored:
-	// M1 never executes client tools (docs §14). The count is echoed in the
-	// response meta as client_tools_ignored.
+	// Tools declares the caller's client tools (M3-1): function tools are
+	// bridged into the run — the model's calls come back as
+	// finish_reason="tool_calls", and the next request carries tool results
+	// that resume the run. gateway_tool_policy "none" ignores them instead
+	// (counted in meta.client_tools_ignored).
 	Tools      []ClientToolDefinition `json:"tools,omitempty"`
 	ToolChoice json.RawMessage        `json:"tool_choice,omitempty"`
 }
@@ -215,12 +217,17 @@ type CompletionMeta struct {
 	Warnings []string `json:"warnings,omitempty"`
 	// IgnoredParams echoes the sampling params the gateway dropped.
 	IgnoredParams []string `json:"ignored_params,omitempty"`
-	// ClientToolsIgnored counts received-but-not-executed client tools.
+	// ClientToolsIgnored counts received-but-not-bridged client tools (only
+	// set when the agent's gateway_tool_policy is "none").
 	ClientToolsIgnored int `json:"client_tools_ignored,omitempty"`
 	// AgentID is the resolved agent UUID.
 	AgentID string `json:"agent_id,omitempty"`
 	// SessionID is the temporary gateway session; findable in the web UI.
 	SessionID string `json:"session_id,omitempty"`
+	// BridgePending marks a finish_reason="tool_calls" response (M3-1): the
+	// run is suspended until the caller returns tool results carrying the
+	// same call IDs.
+	BridgePending bool `json:"bridge_pending,omitempty"`
 }
 
 // ChatCompletionChoice is one completion alternative (the gateway always
@@ -228,13 +235,16 @@ type CompletionMeta struct {
 type ChatCompletionChoice struct {
 	Index        int          `json:"index"`
 	Message      *RespMessage `json:"message,omitempty"`
-	FinishReason string       `json:"finish_reason"` // "stop" in M1
+	FinishReason string       `json:"finish_reason"` // "stop" | "tool_calls"
 }
 
 // RespMessage is the assistant message of a non-streaming response.
 type RespMessage struct {
 	Role    string `json:"role"` // "assistant"
 	Content string `json:"content"`
+	// ToolCalls is set on M3-1 bridge responses (finish_reason
+	// "tool_calls"): the calls the client must execute and return.
+	ToolCalls []ClientToolCall `json:"tool_calls,omitempty"`
 }
 
 // ChatCompletionChunk is one SSE payload in streaming mode.
@@ -268,6 +278,26 @@ type Delta struct {
 	// ReasoningContent carries intermediate thinking deltas (DeepSeek-style
 	// extension; rendered as reasoning by pi/zcode/deepseek clients).
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+	// ToolCalls carries M3-1 client tool calls: one entry per call, streamed
+	// in model order before finish_reason "tool_calls".
+	ToolCalls []OutToolCallDelta `json:"tool_calls,omitempty"`
+}
+
+// OutToolCallDelta is one streaming tool_calls entry. The full id, name and
+// arguments arrive in a single delta (WeKnora emits complete calls, not
+// fragments).
+type OutToolCallDelta struct {
+	Index    int        `json:"index"`
+	ID       string     `json:"id"`
+	Type     string     `json:"type"`
+	Function *OutFnCall `json:"function,omitempty"`
+}
+
+// OutFnCall is the function payload of a tool call (streaming and
+// non-streaming share it).
+type OutFnCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // Usage reports token consumption for the whole gateway turn. Both counters
@@ -301,10 +331,14 @@ type ErrorBody struct {
 	Code    string `json:"code,omitempty"`
 }
 
-// FinishStop is the only finish_reason the gateway emits in M1: client tools
-// are not executed, so the run always ends in a textual answer or an error
-// event.
+// FinishStop is the plain-answer finish_reason: the run produced a final
+// text answer.
 const FinishStop = "stop"
+
+// FinishToolCalls is the M3-1 bridge finish_reason: the model asked for
+// client tool calls and the run is suspended until the caller returns
+// results as tool-role messages carrying the same call IDs.
+const FinishToolCalls = "tool_calls"
 
 // unixTime returns t as unix seconds, 0 for nil/zero — published_at is
 // nullable in the DB.

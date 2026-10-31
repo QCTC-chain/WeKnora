@@ -250,6 +250,18 @@ func (e *AgentEngine) executeToolCalls(
 
 	logger.Infof(ctx, "[Agent][Round-%d] Executing %d tool call(s)", round, n)
 
+	// A round that calls a gateway client tool runs strictly sequentially (M3-1):
+	// the first client call raises one batch prompt covering the whole round;
+	// if it suspends, the calls after it must not run.
+	if rb := e.roundBridgeFor(response.ToolCalls, false); rb != nil {
+		for i, tc := range response.ToolCalls {
+			if s := e.executeSingleToolCall(ctx, tc, i, step, iteration, round, sessionID, assistantMessageID, rb); s != nil {
+				return s
+			}
+		}
+		return nil
+	}
+
 	// Use parallel execution when enabled and there are multiple tool calls
 	if e.config.ParallelToolCalls && n >= 2 {
 		return e.executeToolCallsParallel(ctx, response, step, iteration, sessionID, assistantMessageID)
@@ -423,14 +435,69 @@ func (e *AgentEngine) emitToolOutcome(
 	})
 }
 
+// roundBridge carries one ReAct round's gateway client-tool-bridge wiring:
+// the whole call batch the first client tool raises to the API caller, and
+// the shared holder for an in-place (between raise and suspend) answer.
+type roundBridge struct {
+	clientBatch []types.ExternalToolCallSpec
+	bridge      *agenttools.ClientBridgeState
+}
+
+// roundBridgeFor wires the client-tool bridge for a round, or returns nil
+// when no call targets a registered client tool (ordinary rounds skip it).
+// idsNormalized must be false for raw LLM calls (IDs get normalized here the
+// same way runToolCallAnswered does) and true for snapshot calls, whose IDs
+// are final and must not be re-derived.
+func (e *AgentEngine) roundBridgeFor(calls []types.LLMToolCall, idsNormalized bool) *roundBridge {
+	hasClient := false
+	for _, tc := range calls {
+		if e.toolRegistry.IsClientTool(tc.Function.Name) {
+			hasClient = true
+			break
+		}
+	}
+	if !hasClient {
+		return nil
+	}
+	rb := &roundBridge{bridge: &agenttools.ClientBridgeState{}}
+	for i, tc := range calls {
+		if !e.toolRegistry.IsClientTool(tc.Function.Name) {
+			continue
+		}
+		tool, err := e.toolRegistry.GetTool(tc.Function.Name)
+		if err != nil {
+			continue
+		}
+		wire := tc.Function.Name
+		if c, ok := tool.(interface{ WireName() string }); ok {
+			wire = c.WireName()
+		}
+		callID := tc.ID
+		if !idsNormalized {
+			callID = agenttools.NormalizeToolCallID(callID, tc.Function.Name, i)
+		}
+		rb.clientBatch = append(rb.clientBatch, types.ExternalToolCallSpec{
+			CallID:    callID,
+			Name:      tc.Function.Name,
+			WireName:  wire,
+			Arguments: tc.Function.Arguments,
+		})
+	}
+	if len(rb.clientBatch) > types.MaxExternalToolCallsPerRound {
+		rb.clientBatch = rb.clientBatch[:types.MaxExternalToolCallsPerRound]
+	}
+	return rb
+}
+
 // executeSingleToolCall runs one tool call sequentially (original behavior).
 // A call suspended on a user prompt is not appended; its suspension is
 // returned instead.
 func (e *AgentEngine) executeSingleToolCall(
 	ctx context.Context, tc types.LLMToolCall, i int,
 	step *types.AgentStep, iteration, round int, sessionID, assistantMessageID string,
+	rb ...*roundBridge,
 ) *types.PromptSuspension {
-	toolCall := e.runToolCall(ctx, tc, i, iteration, round, sessionID, assistantMessageID)
+	toolCall := e.runToolCall(ctx, tc, i, iteration, round, sessionID, assistantMessageID, rb...)
 	if s := suspensionOf(toolCall); s != nil {
 		return s
 	}
@@ -445,15 +512,18 @@ func (e *AgentEngine) executeSingleToolCall(
 func (e *AgentEngine) runToolCall(
 	ctx context.Context, tc types.LLMToolCall, i int,
 	iteration, round int, sessionID, assistantMessageID string,
+	rb ...*roundBridge,
 ) types.ToolCall {
-	return e.runToolCallAnswered(ctx, tc, i, iteration, round, sessionID, assistantMessageID, nil)
+	return e.runToolCallAnswered(ctx, tc, i, iteration, round, sessionID, assistantMessageID, nil, rb...)
 }
 
 // runToolCallAnswered is runToolCall for a call whose prompt may already be
-// answered (see ToolExecContext.Answered).
+// answered (see ToolExecContext.Answered). The optional roundBridge wires the
+// gateway's client-tool passthrough for this ReAct round (M3-1).
 func (e *AgentEngine) runToolCallAnswered(
 	ctx context.Context, tc types.LLMToolCall, i int,
 	iteration, round int, sessionID, assistantMessageID string, answered *types.AgentPrompt,
+	rb ...*roundBridge,
 ) types.ToolCall {
 	tc.ID = agenttools.NormalizeToolCallID(tc.ID, tc.Function.Name, i)
 	total := "?" // unknown in isolation; callers log the batch size
@@ -598,7 +668,7 @@ func (e *AgentEngine) runToolCallAnswered(
 			execTimeout = max(execTimeout, timed.ExecutionTimeout())
 		}
 	}
-	toolExecCtx := agenttools.WithToolExecContext(toolCtx, &agenttools.ToolExecContext{
+	toolExecMeta := &agenttools.ToolExecContext{
 		SessionID:          sessionID,
 		AssistantMessageID: assistantMessageID,
 		EventBus:           e.eventBus,
@@ -611,7 +681,14 @@ func (e *AgentEngine) runToolCallAnswered(
 		Snapshot:    e.snapshotFunc(i, tc.Function.Name),
 		Answered:    answered,
 		Mode:        e.mode,
-	})
+	}
+	if len(rb) > 0 && rb[0] != nil {
+		// Gateway client-tool bridge round (M3-1): every client tool sees the
+		// round's whole call batch plus the shared in-place answer holder.
+		toolExecMeta.ClientBatch = rb[0].clientBatch
+		toolExecMeta.Bridge = rb[0].bridge
+	}
+	toolExecCtx := agenttools.WithToolExecContext(toolCtx, toolExecMeta)
 
 	var result *types.ToolResult
 	var err error

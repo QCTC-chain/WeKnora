@@ -1823,6 +1823,16 @@
         v-show="currentSection === 'share'" class="section">
         <AgentShareSettings :agent-id="editorAgent.id" :agent="editorAgent" />
       </div>
+
+      <!-- 发布为 OpenAI 兼容模型（仅编辑模式且非内置智能体） -->
+      <div v-if="editorMode === 'edit' && editorAgent?.id && !editorAgent?.is_builtin"
+        v-show="currentSection === 'gateway'" class="section">
+        <AgentGatewayPublishSettings
+          :agent-id="editorAgent.id"
+          :agent="editorAgent"
+          @updated="onGatewayPublished"
+        />
+      </div>
     </div>
 
     <template #footer-note>
@@ -1928,6 +1938,7 @@ import SandboxSkillsPanel from '@/components/SandboxSkillsPanel.vue';
 import SettingDrawer from '@/components/settings/SettingDrawer.vue';
 import KBParserSettings, { type ParserEngineRule } from '@/views/knowledge/settings/KBParserSettings.vue';
 import AgentShareSettings from '@/components/AgentShareSettings.vue';
+import AgentGatewayPublishSettings from '@/components/AgentGatewayPublishSettings.vue';
 import { SKILL_ICON } from '@/types/mention';
 import { listEmbedChannels } from '@/api/embed';
 import { ASSISTANT_ACCESS_LEVELS, type AssistantAccessLevel } from '@/api/assistant';
@@ -2096,6 +2107,14 @@ const applyInitialFieldHighlight = async (field: string) => {
     }
     highlightClearTimer = null;
   }, FIELD_FLASH_DURATION_MS);
+};
+
+// 发布为模型面板回传最新 agent：同步编辑态副本并通知父级刷新列表
+const onGatewayPublished = (agent: CustomAgent) => {
+  if (savedAgent.value && savedAgent.value.id === agent.id) {
+    savedAgent.value = agent;
+  }
+  emit('success', agent);
 };
 
 const onAgentEditorFocusSection = (event: Event) => {
@@ -2855,6 +2874,7 @@ const navItems = computed(() => {
   // 发布（仅编辑模式）
   if (editorMode.value === 'edit' && editorAgent.value?.id && !editorAgent.value?.is_builtin && !authStore.isLiteMode) {
     items.push({ key: 'share', icon: 'share', label: t('knowledgeEditor.sidebar.share') });
+    items.push({ key: 'gateway', icon: 'cloud', label: t('agentEditor.gateway.navLabel') });
   }
   return items;
 });
@@ -2883,7 +2903,7 @@ const navGroups = computed(() => {
     {
       key: 'integration',
       label: t('agentEditor.navGroups.integration'),
-      items: pickItems(['share']),
+      items: pickItems(['share', 'gateway']),
     },
   ].filter((group) => group.items.length > 0);
 });

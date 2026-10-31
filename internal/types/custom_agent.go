@@ -184,6 +184,23 @@ func ValidGatewayScope(s string) bool {
 	return false
 }
 
+// Gateway tool policies for published models (M3-1). Empty behaves as "all".
+const (
+	GatewayToolPolicyAll        = "all"
+	GatewayToolPolicyClientOnly = "client_only"
+	GatewayToolPolicyNone       = "none"
+)
+
+// ValidGatewayToolPolicy reports whether s selects a supported gateway tool
+// policy ("" is the implicit "all").
+func ValidGatewayToolPolicy(s string) bool {
+	switch s {
+	case "", GatewayToolPolicyAll, GatewayToolPolicyClientOnly, GatewayToolPolicyNone:
+		return true
+	}
+	return false
+}
+
 // GatewayPublishUpdate carries one gateway publish/unpublish request with
 // the M2-a governance fields. PublishSet distinguishes "request did not
 // touch the published flag" (governance-only scope/sunset PATCH) from an
@@ -203,6 +220,10 @@ type GatewayPublishUpdate struct {
 	// combined with publish; rejecting past instants avoids publishing an
 	// agent that resolves as unpublished on the very next request.
 	Sunset *time.Time
+	// Policy optionally sets config.gateway_tool_policy (M3-1). Nil keeps
+	// the stored value; the new value also lands in a fresh publish
+	// snapshot because snapshots clone the live config.
+	Policy *string
 	// SunsetClear removes an existing sunset (PATCH deprecation_sunset:null).
 	SunsetClear bool
 }
@@ -331,6 +352,14 @@ type CustomAgentConfig struct {
 	// means auto_write. The WeKnora assistant uses the workspace's assistant
 	// ceiling instead.
 	AccessLevel AssistantAccessLevel `yaml:"access_level,omitempty" json:"access_level,omitempty"`
+
+	// ===== Model Gateway Settings =====
+	// GatewayToolPolicy narrows what a gateway (OpenAI-compat) run of this
+	// agent may use (M3-1/M3-2). Empty or "all": internal tools plus the
+	// caller's client tools; "client_only": client tools only; "none":
+	// client tool definitions are ignored (M1 behavior). Frozen into the
+	// publish snapshot like every other config field.
+	GatewayToolPolicy string `yaml:"gateway_tool_policy,omitempty" json:"gateway_tool_policy,omitempty" extensions:"x-agent,x-agent-detail"`
 
 	// ===== Skills Settings (only for smart-reasoning mode) =====
 	// Skills selection mode: "all" = all installed skills, "selected" = specific skills, "none" = no skills

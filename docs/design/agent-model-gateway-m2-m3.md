@@ -142,11 +142,26 @@ sequenceDiagram
 
 工作量:约 3~4 周(引擎 prompt kind 与注册表 1.5 周、网关状态机与协议 1 周、恢复/清理/安全 1 周、兼容测试 0.5 周)。**建议独立灰度**:先支持单工具、非流式,再放开并行与流式。
 
+### 7.4 实现记录(M3-1 已落地)
+
+- **协议与载荷**:`internal/types/external_tool.go` 定义 kind=`external_tool_call`、`ExternalToolCallSpec`(≤32 调用/批、参数 ≤32000 字符、结果 ≤32000 字符)与响应校验(恰好一结果/调用);`ClientToolSpec` 随 `QARequest.ClientTools` 下发。
+- **引擎侧**:`approval/external_tool.go` 提供热等 + 可挂起双模(无人值守降级为礼貌失败);`tools/client_tool.go` 注册调用方工具(与内置工具同名时以 `client_<name>` 注册,对外名不变);`act.go` 客户端工具轮严格串行并整批复挂起;`resume.go` 恢复时重建桥并复用已应答批;挂起快照把 `ClientTools` 冻结进 `ResumableAgentRequest`(`types/qa_request.go`),续轮即使不带 `tools[]` 也能恢复注册。`GatewayToolPolicy`(`""`/`all`/`client_only`/`none`)在 `AgentConfig` 上持久化并随发布快照固化,`client_only` 通过注册表裁剪隐藏内置工具。
+- **网关侧**:`openai_compat/bridge.go` 生成自描述 HMAC 调用 ID(`wc1_<prompt>.<call>.<exp>.<mac>`,TTL 对齐挂起过期,`GATEWAY_TOOL_BRIDGE_SECRET` 显式配置供多副本共享);挂起经 `finish_reason:"tool_calls"`(流式 `delta.tool_calls`)/ Anthropic `tool_use` 返回,`meta.bridge_pending:true`;`bridge_resume.go` 实现续轮:`tool` 消息解码 → 校验挂起归属(会话 kind/租户/智能体一致,否则 409 `model_mismatch`)→ 结果完整性校验 → hitl.Resolve + 快照恢复 → 复用用户/助手消息行续跑;网关实例未启用恢复时降级 503 `bridge_unavailable`。
+- **管理端**:智能体编辑页新增「发布为模型」页签(`AgentGatewayPublishSettings.vue`),支持发布开关、调用范围(`published_scope`)、工具策略(`gateway_tool_policy`)、弃用时间与端点复制;`PATCH /api/v1/agents/:id` 把 `gateway_tool_policy` 纳入发布治理路径(纯策略修改不触发配置重校验、不递增版本)。
+- **测试**:`internal/agent/client_tool_test.go`(整批挂起/乱序恢复/就地应答/无桥降级)、`internal/handler/openai_compat/bridge_test.go`(调用 ID 编解码/过期、tools 校验、结果解码、挂起→tool_calls 应答含流式与 Anthropic 壳、无 broker 503)、发布治理策略测试(`custom_agent_publish_test.go`)。
+
 ## 8. M3-2 安全边界
 
 - 客户端工具结果直接进入模型上下文 → 提示注入面扩大:结果文本在注入前过现有内容净化与长度上限;高危动作(WeKnora 侧工具)审批门不受影响。
 - API key 泄露场景:per-key 白名单(M2-2)+ agent 级"网关可用工具"收缩建议 + 配额硬顶。
 - 网关永不接受客户端指定的 `agent_id`/KB/MCP 覆盖——能力面完全由发布快照决定,请求参数只能收窄不能放大。
+
+### 8.1 实现记录(M3-2 已落地)
+
+- **结果净化与上限(双重)**:网关边界由 `ValidateExternalToolCallResponse` 拒绝超过 `MaxExternalToolResultRunes`(32000)的结果;注入模型上下文前 `externalToolResult`(`internal/agent/tools/client_tool.go`)再次截断并执行 `sanitizeExternalToolContent`——归一化换行、剔除 C0 控制字符(保留 `\n`/`\t`)及 DEL/C1,阻断控制字符类上下文操纵。WeKnora 内置工具的审批门(`approval.Gate`)与客户端工具互不影响:客户端工具不走审批门,内置工具在 `client_only` 策略下根本不暴露。
+- **API key 泄露收敛**:M2-2 的 per-key 模型白名单与配额硬顶继续生效;agent 级"网关可用工具"收缩由 `gateway_tool_policy`(`client_only` 隐藏全部内置工具)与 `none`(忽略调用方工具)落地,策略随发布快照固化。
+- **能力面只读**:两个协议壳的请求体均不携带能力字段——`ChatCompletionRequest` 仅 `model/messages/stream/user/stream_options/tools/tool_choice`,`AnthropicMessagesRequest` 仅 `model/max_tokens/system/messages/stream/metadata.user_id/tools`;KB/MCP/技能/内部工具全部来自发布快照,调用方最多通过 `tools[]` 增加客户端工具,不能放大服务端能力。挂起恢复严格绑定(会话 kind + `LastRequestState.AgentID` 匹配,否则 409 `model_mismatch`),call_id 为 HMAC 签名防枚举与过期。
+- **测试**:控制字符净化(`TestExternalToolResultSanitizesControlChars`)、HMAC 过期/防篡改(`TestBridgeCallIDRoundTrip`)、跨模型恢复拒绝(`TestChatCompletionsBridgeResumeWrongAgent`,失败后 prompt 仍挂起可应答)。
 
 ## 9. 里程碑与顺序
 
@@ -158,7 +173,7 @@ sequenceDiagram
 | M2-d | 幂等(§4) | 无 | ✅ 已实现(migration 000138/000055) |
 | M2-e | Anthropic 端点(§5) | 无 | ✅ 已实现 |
 | M2-f | 可观测性(§6) | §2 | ✅ 已实现 |
-| M3 | 工具透传(§7-§8) | §1(发布快照)、§3(会话续接) | 规划 |
+| M3 | 工具透传(§7-§8) | §1(发布快照)、§3(会话续接) | ✅ 已实现(M3-1 §7.4 + M3-2 §8.1) |
 
 M2 总量约 5~6 周(可并行拆分);M3 约 3~4 周 + 灰度期。
 

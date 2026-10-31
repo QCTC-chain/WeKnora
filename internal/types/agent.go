@@ -195,6 +195,18 @@ type AgentConfig struct {
 	// LLM call timeout in seconds (default: 120). Controls the maximum time for a single LLM call.
 	LLMCallTimeout int `json:"llm_call_timeout,omitempty"`
 
+	// GatewayToolPolicy narrows what a gateway (OpenAI-compat) run of this
+	// agent may use (M3-1/M3-2). Empty or "all" keeps every internal tool
+	// plus the caller's client tools; "client_only" hides internal tools;
+	// "none" ignores client tool definitions entirely (M1 behavior).
+	// Persisted on the agent and frozen into the publish snapshot.
+	GatewayToolPolicy string `json:"gateway_tool_policy,omitempty"`
+
+	// ClientTools are the gateway caller's tool definitions for this run
+	// (runtime only, gateway callers only). The engine registers them as
+	// suspend-on-call client tools.
+	ClientTools []ClientToolSpec `json:"-"`
+
 	// Maximum completion tokens for each ReAct LLM round. Zero means
 	// DefaultMaxCompletionTokens for this agent's mode and sandbox.
 	// Explicit values are sent as-is.

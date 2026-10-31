@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -154,6 +155,25 @@ func (e *AgentEngine) Resume(
 	return state, nil
 }
 
+// DecodeResumableRequest decodes the caller request a suspended run saved,
+// falling back to the snapshot's raw query for older snapshots.
+func DecodeResumableRequest(snapshot []byte, req *types.ResumableAgentRequest) error {
+	snap, err := DecodeRunSnapshot(snapshot)
+	if err != nil {
+		return err
+	}
+	if len(snap.Request) == 0 {
+		return fmt.Errorf("run state carries no request")
+	}
+	if err := json.Unmarshal(snap.Request, req); err != nil {
+		return fmt.Errorf("decode saved request: %w", err)
+	}
+	if req.Query == "" {
+		req.Query = snap.Query
+	}
+	return nil
+}
+
 func pendingCallHistory(p PendingRound) []chat.Message {
 	calls := make([]chat.ToolCall, len(p.Calls))
 	for i, c := range p.Calls {
@@ -166,7 +186,9 @@ func pendingCallHistory(p PendingRound) []chat.Message {
 
 // finishPendingRound runs the interrupted round from its blocked call on,
 // sequentially. The blocked call receives the answer; a later call may raise
-// a prompt of its own and suspend the round again.
+// a prompt of its own and suspend the round again. An external_tool_call
+// answer covers every client tool call of the round (M3-1), so blocked-call
+// client siblings receive it too, each picking its own result.
 func (e *AgentEngine) finishPendingRound(
 	ctx context.Context, p PendingRound, answered *types.AgentPrompt,
 	iteration int, sessionID, messageID string,
@@ -184,6 +206,14 @@ func (e *AgentEngine) finishPendingRound(
 		}
 	}
 
+	// Build the round's client-tool bridge from the snapshot when the answer
+	// is an external_tool_call batch: later client calls read their results
+	// from it instead of raising a new prompt.
+	rb := e.roundBridgeFor(calls[p.BlockedIndex:], true)
+	if answered != nil && answered.Kind == types.AgentPromptKindExternalToolCall && rb != nil {
+		rb.bridge.AnsweredBatch = answered
+	}
+
 	round := iteration + 1
 	e.beginRound(step, calls)
 	defer e.endRound()
@@ -194,8 +224,11 @@ func (e *AgentEngine) finishPendingRound(
 		var answer *types.AgentPrompt
 		if i == p.BlockedIndex {
 			answer = answered
+		} else if answered != nil && answered.Kind == types.AgentPromptKindExternalToolCall &&
+			e.toolRegistry.IsClientTool(calls[i].Function.Name) {
+			answer = answered
 		}
-		toolCall := e.runToolCallAnswered(ctx, calls[i], i, iteration, round, sessionID, messageID, answer)
+		toolCall := e.runToolCallAnswered(ctx, calls[i], i, iteration, round, sessionID, messageID, answer, rb)
 		if s := suspensionOf(toolCall); s != nil {
 			return step, s
 		}

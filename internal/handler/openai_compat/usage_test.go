@@ -48,7 +48,7 @@ func serveWithScope(
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	handler := NewGatewayHandler(svc, nil, nil, nil, nil, usage, nil, nil)
+	handler := NewGatewayHandler(svc, nil, nil, nil, nil, usage, nil, nil, nil)
 	inject := func(c *gin.Context) {
 		ctx := context.WithValue(c.Request.Context(), types.TenantIDContextKey, uint64(42))
 		if scope != nil {
@@ -156,7 +156,7 @@ func serveCompletionsWithScope(
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	handler := NewGatewayHandler(svc, &fakeGatewaySessions{script: script}, &fakeGatewayMessages{}, nil, nil, usage, nil, nil)
+	handler := NewGatewayHandler(svc, &fakeGatewaySessions{script: script}, &fakeGatewayMessages{}, nil, nil, usage, nil, nil, nil)
 	router.POST("/v1/chat/completions", func(c *gin.Context) {
 		ctx := context.WithValue(c.Request.Context(), types.TenantIDContextKey, uint64(42))
 		if scope != nil {

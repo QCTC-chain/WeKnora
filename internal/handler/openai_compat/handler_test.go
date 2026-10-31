@@ -51,7 +51,7 @@ var testGatewayCfg *config.Config
 // newTestHandler builds a GatewayHandler with optional gateway-side fakes;
 // nil sessions/messages keep list/resolve tests free of QA plumbing.
 func newTestHandler(svc *fakeAgentService, sessions interfaces.SessionService, messages interfaces.MessageService) *GatewayHandler {
-	return NewGatewayHandler(svc, sessions, messages, nil, nil, nil, nil, testGatewayCfg)
+	return NewGatewayHandler(svc, sessions, messages, nil, nil, nil, nil, nil, testGatewayCfg)
 }
 
 // serveModels mounts ListModels behind nothing (auth is the middleware's

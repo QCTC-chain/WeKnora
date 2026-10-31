@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/Tencent/WeKnora/internal/types"
 )
 
 // Renderer limits (docs/design/agent-model-gateway-m1.md §7.2). The client
@@ -44,6 +46,9 @@ type renderedTurn struct {
 	Query    string
 	Images   []string
 	Warnings []string
+	// ClientTools are the caller's bridgeable tool definitions (M3-1),
+	// validated and policy-gated; nil keeps the M1 ignored-tools behavior.
+	ClientTools []types.ClientToolSpec
 }
 
 // renderMessages folds an OpenAI messages array into one gateway query:

@@ -42,7 +42,7 @@ func serveModelsWithUser(t *testing.T, svc *fakeAgentService, shares interfaces.
 		}
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()
-	}, NewGatewayHandler(svc, nil, nil, nil, shares, nil, nil, nil).ListModels)
+	}, NewGatewayHandler(svc, nil, nil, nil, shares, nil, nil, nil, nil).ListModels, nil)
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -153,7 +153,7 @@ func TestResolveAgentSnapshotConfig(t *testing.T) {
 	agent.Config = types.CustomAgentConfig{AgentMode: types.AgentModeSmartReasoning, SystemPrompt: "live"}
 	agent.GatewaySnapshot = &types.CustomAgentConfig{AgentMode: types.AgentModeQuickAnswer, SystemPrompt: "frozen"}
 	svc := &fakeAgentService{agents: []*types.CustomAgent{agent}}
-	h := NewGatewayHandler(svc, nil, nil, nil, nil, nil, nil, nil)
+	h := NewGatewayHandler(svc, nil, nil, nil, nil, nil, nil, nil, nil)
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(42))
 
 	got, ok := h.resolveAgent(ctx, 42, "Doc QA")
@@ -175,7 +175,7 @@ func TestResolveAgentSunsetExpiredGone(t *testing.T) {
 	agent := gatewayAgent("agt-1", "Doc QA", types.GatewayScopeTenant, "u1")
 	agent.GatewaySunset = &past
 	svc := &fakeAgentService{agents: []*types.CustomAgent{agent}}
-	h := NewGatewayHandler(svc, nil, nil, nil, nil, nil, nil, nil)
+	h := NewGatewayHandler(svc, nil, nil, nil, nil, nil, nil, nil, nil)
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(42))
 
 	_, ok := h.resolveAgent(ctx, 42, "agt-1")
@@ -185,7 +185,7 @@ func TestResolveAgentSunsetExpiredGone(t *testing.T) {
 func TestResolveAgentPrivateScopeOtherUser404(t *testing.T) {
 	agent := gatewayAgent("agt-1", "Doc QA", types.GatewayScopePrivate, "u1")
 	svc := &fakeAgentService{agents: []*types.CustomAgent{agent}}
-	h := NewGatewayHandler(svc, nil, nil, nil, nil, nil, nil, nil)
+	h := NewGatewayHandler(svc, nil, nil, nil, nil, nil, nil, nil, nil)
 	ctx := context.WithValue(
 		context.WithValue(context.Background(), types.TenantIDContextKey, uint64(42)),
 		types.UserIDContextKey, "u2")

@@ -256,3 +256,31 @@ func TestPatchAgentPublishAuditActions(t *testing.T) {
 	require.EqualValues(t, 1, repo.agent.GatewayVersion)
 	_ = future
 }
+
+func TestPatchAgentPublishToolPolicyGovernance(t *testing.T) {
+	repo := &publishRepo{agent: &types.CustomAgent{ID: "custom-1", Name: "Doc QA", TenantID: 1}}
+	// Publish + policy in one call; the policy freezes into the snapshot.
+	rec := patchPublishedWithAudit(t, repo, &recordingAudit{},
+		`{"published": true, "gateway_tool_policy": "client_only"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got := governanceBody(t, rec)
+	require.True(t, got.Published)
+	require.Equal(t, types.GatewayToolPolicyClientOnly, got.Config.GatewayToolPolicy)
+	require.NotNil(t, got.GatewaySnapshot)
+	require.Equal(t, types.GatewayToolPolicyClientOnly, got.GatewaySnapshot.GatewayToolPolicy)
+
+	// A policy-only PATCH skips the config path and answers directly.
+	repo2 := &publishRepo{agent: &types.CustomAgent{
+		ID: "custom-1", Name: "Doc QA", TenantID: 1, Published: true, GatewayVersion: 2,
+	}}
+	rec = patchPublished(t, repo2, `{"gateway_tool_policy": "none"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got = governanceBody(t, rec)
+	require.Equal(t, types.GatewayToolPolicyNone, got.Config.GatewayToolPolicy)
+	require.EqualValues(t, 2, got.GatewayVersion, "policy flip must not release a version")
+
+	// Invalid values are rejected on the governance path.
+	repo3 := &publishRepo{agent: &types.CustomAgent{ID: "custom-1", Name: "Doc QA", TenantID: 1}}
+	rec = patchPublished(t, repo3, `{"gateway_tool_policy": "sometimes"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
