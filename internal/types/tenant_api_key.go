@@ -30,11 +30,21 @@ type TenantAPIKey struct {
 	// (KnowledgeBaseIDs) still applies on top where a route targets knowledge
 	// bases.
 	Capabilities StringArray `json:"capabilities" gorm:"type:jsonb;not null;default:'[]'"`
-	LastUsedAt   *time.Time  `json:"last_used_at,omitempty"`
-	ExpiresAt    *time.Time  `json:"expires_at,omitempty"`
-	RevokedAt    *time.Time  `json:"revoked_at,omitempty" gorm:"index"`
-	CreatedAt    time.Time   `json:"created_at"`
-	UpdatedAt    time.Time   `json:"updated_at"`
+	// AgentGrants is the M2-b gateway agent whitelist: agent UUIDs. Empty =
+	// every published (scope-visible) agent is callable; non-empty = only
+	// listed agents. Applies to /v1 models + completions only.
+	AgentGrants StringArray `json:"agent_grants" gorm:"type:jsonb;not null;default:'[]'"`
+	// DailyTokenBudget caps the key's gateway total tokens per UTC day;
+	// nil = unlimited. Enforced at request entry against gateway_usage sums.
+	DailyTokenBudget *int64 `json:"daily_token_budget,omitempty"`
+	// DailyRequestBudget caps the key's gateway requests per UTC day; nil
+	// = unlimited.
+	DailyRequestBudget *int64     `json:"daily_request_budget,omitempty"`
+	LastUsedAt         *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	RevokedAt          *time.Time `json:"revoked_at,omitempty" gorm:"index"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type APIKeyScopeType string
@@ -166,6 +176,33 @@ const (
 
 // NormalizeAPIKeyCapability maps an input capability string to a known
 // capability, returning "" for anything unrecognised so callers can drop it.
+// agentGrantsMax bounds the per-key gateway whitelist: a key is an access
+// principal, not a project registry; larger sets mean the operator should
+// leave the whitelist empty instead.
+const agentGrantsMax = 100
+
+// NormalizeAPIKeyAgentGrants trims, dedupes and caps the gateway agent
+// whitelist (M2-b). Empty result = unrestricted.
+func NormalizeAPIKeyAgentGrants(grants StringArray) StringArray {
+	out := make(StringArray, 0, len(grants))
+	seen := make(map[string]struct{}, len(grants))
+	for _, id := range grants {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+		if len(out) >= agentGrantsMax {
+			break
+		}
+	}
+	return out
+}
+
 func NormalizeAPIKeyCapability(c APIKeyCapability) APIKeyCapability {
 	switch APIKeyCapability(strings.ToLower(strings.TrimSpace(string(c)))) {
 	case APIKeyCapabilityRetrieve:
@@ -273,6 +310,10 @@ type TenantAPIKeyScope struct {
 	FullAccess       bool
 	KnowledgeBaseIDs StringArray
 	Capabilities     StringArray
+	// M2-b gateway grants/quotas mirrored from the key row.
+	AgentGrants        StringArray
+	DailyTokenBudget   *int64
+	DailyRequestBudget *int64
 }
 
 func WithTenantAPIKeyScope(ctx context.Context, scope TenantAPIKeyScope) context.Context {
@@ -292,12 +333,15 @@ func TenantAPIKeyScopeFromContext(ctx context.Context) (TenantAPIKeyScope, bool)
 
 func (s TenantAPIKeyScope) Normalize() TenantAPIKeyScope {
 	return TenantAPIKeyScope{
-		KeyID:            s.KeyID,
-		Name:             s.Name,
-		ScopeType:        NormalizeAPIKeyScopeType(s.ScopeType),
-		FullAccess:       s.FullAccess,
-		KnowledgeBaseIDs: normalizeIDArray(s.KnowledgeBaseIDs),
-		Capabilities:     NormalizeAPIKeyCapabilities(s.Capabilities),
+		KeyID:              s.KeyID,
+		Name:               s.Name,
+		ScopeType:          NormalizeAPIKeyScopeType(s.ScopeType),
+		FullAccess:         s.FullAccess,
+		KnowledgeBaseIDs:   normalizeIDArray(s.KnowledgeBaseIDs),
+		Capabilities:       NormalizeAPIKeyCapabilities(s.Capabilities),
+		AgentGrants:        normalizeIDArray(s.AgentGrants),
+		DailyTokenBudget:   s.DailyTokenBudget,
+		DailyRequestBudget: s.DailyRequestBudget,
 	}
 }
 

@@ -5,9 +5,9 @@ export const CHROME_EXTENSION_URL =
 
 export const CLAWHUB_SKILL_URL = 'https://clawhub.ai/lyingbug/weknora'
 
-export type IntegrationTab = 'im' | 'embed' | 'api' | 'mcpserver' | 'cli' | 'chrome' | 'claw'
+export type IntegrationTab = 'im' | 'embed' | 'api' | 'gateway' | 'mcpserver' | 'cli' | 'chrome' | 'claw'
 
-export const INTEGRATION_TABS: IntegrationTab[] = ['im', 'embed', 'api', 'mcpserver', 'cli', 'chrome', 'claw']
+export const INTEGRATION_TABS: IntegrationTab[] = ['im', 'embed', 'api', 'gateway', 'mcpserver', 'cli', 'chrome', 'claw']
 
 /** Aligns with Settings.vue SECTION_MIN_ROLE.api and router.go g.Owner() on /api-principal-config. */
 export type IntegrationTabRole = 'viewer' | 'contributor' | 'admin' | 'owner'
@@ -20,6 +20,7 @@ export const INTEGRATION_TAB_CAPABILITY: Partial<Record<IntegrationTab, Deployme
   im: 'integrations.im',
   embed: 'integrations.embed',
   api: 'integrations.api',
+  gateway: 'integrations.gateway',
   mcpserver: 'integrations.mcpserver',
 }
 
@@ -35,6 +36,7 @@ export const INTEGRATION_PREVIEW_ITEMS: Array<{
   { key: 'im', icon: { type: 'icon', name: 'chat-message' } },
   { key: 'embed', icon: { type: 'icon', name: 'code' } },
   { key: 'api', icon: { type: 'icon', name: 'secured' } },
+  { key: 'gateway', icon: { type: 'icon', name: 'cloud' } },
   { key: 'mcpserver', icon: { type: 'icon', name: 'tools' } },
   { key: 'cli', icon: { type: 'icon', name: 'code' } },
   { key: 'chrome', icon: { type: 'icon', name: 'extension' } },

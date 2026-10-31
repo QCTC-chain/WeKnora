@@ -386,6 +386,43 @@ func (r *sessionRepository) UpdateLastRequestState(
 	return res.RowsAffected, res.Error
 }
 
+// FindGatewayThreadSession resolves the M2-3 continuation anchor: the most
+// recently active gateway session for (tenant, owner user, agent). Agent
+// binding lives in the agent_config JSONB (SessionLastRequestState.AgentID)
+// that createGatewaySession pins at creation; matching is dialect-aware
+// (jsonb ->> on PostgreSQL, json_extract on SQLite). Returns (nil, nil) when
+// no live thread exists — the gateway then falls back to a fresh session.
+func (r *sessionRepository) FindGatewayThreadSession(
+	ctx context.Context, tenantID uint64, ownerUserID, agentID string, activeAfter time.Time,
+) (*types.Session, error) {
+	db := r.db.WithContext(ctx).
+		Where("tenant_id = ? AND kind = ? AND user_id = ?", tenantID, types.SessionKindGateway, ownerUserID).
+		Where("updated_at >= ?", activeAfter)
+	if r.db.Dialector.Name() == "postgres" {
+		db = db.Where("agent_config->>'agent_id' = ?", agentID)
+	} else {
+		db = db.Where("json_extract(agent_config, '$.agent_id') = ?", agentID)
+	}
+	var session types.Session
+	err := db.Order("updated_at DESC").First(&session).Error
+	if stderrors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &session, nil
+}
+
+// TouchGatewaySession bumps updated_at on a gateway session so a continued
+// thread keeps its sliding retention window (M2-3 lifecycle). Gateway-kind
+// guard keeps the write off ordinary sessions.
+func (r *sessionRepository) TouchGatewaySession(ctx context.Context, sessionID string) error {
+	return r.db.WithContext(ctx).Model(&types.Session{}).
+		Where("id = ? AND kind = ?", sessionID, types.SessionKindGateway).
+		UpdateColumn("updated_at", time.Now()).Error
+}
+
 // Delete deletes a session
 func (r *sessionRepository) Delete(ctx context.Context, tenantID uint64, userID string, id string) (int64, error) {
 	res := applySessionUserScope(
@@ -619,4 +656,39 @@ func (r *sessionRepository) ListStaleForkSnapshotLeases(
 		return nil, err
 	}
 	return leases, nil
+}
+
+// ListExpiredGatewaySessions returns gateway-kind sessions (kind="gateway",
+// the OpenAI-compatible gateway's one-shot audit sessions) whose last update
+// is older than olderThan, oldest first, capped at limit rows per pass. The
+// gateway session reaper is the only caller (docs design §7.1).
+func (r *sessionRepository) ListExpiredGatewaySessions(
+	ctx context.Context, olderThan time.Time, limit int,
+) ([]*types.Session, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var sessions []*types.Session
+	if err := r.db.WithContext(ctx).
+		Where("kind = ?", types.SessionKindGateway).
+		Where("updated_at < ?", olderThan).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&sessions).Error; err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
+// DeleteGatewaySessionsByID soft-deletes gateway sessions by ID regardless of
+// tenant (the reaper has no user context; the IDs come straight from
+// ListExpiredGatewaySessions, so no scope escape is possible).
+func (r *sessionRepository) DeleteGatewaySessionsByID(ctx context.Context, ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := r.db.WithContext(ctx).
+		Where("kind = ? AND id IN ?", types.SessionKindGateway, ids).
+		Delete(&types.Session{})
+	return res.RowsAffected, res.Error
 }

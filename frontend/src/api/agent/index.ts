@@ -1,4 +1,4 @@
-import { get, post, put, del } from "../../utils/request";
+import { get, post, put, del, patch } from "../../utils/request";
 import type { AssistantAccessLevel } from "../assistant";
 
 // 智能体配置
@@ -56,6 +56,9 @@ export interface CustomAgentConfig {
   // ===== Agent模式设置 =====
   max_iterations?: number;          // 最大迭代次数；-1 表示不限制
   llm_call_timeout?: number;        // LLM调用超时时间（秒）
+  // 网关工具策略（M3-1）：'' / 'all' = 内置工具+调用方工具；'client_only' = 仅调用方工具；
+  // 'none' = 忽略调用方工具定义（M1 行为）。随发布快照冻结。
+  gateway_tool_policy?: 'all' | 'client_only' | 'none';
   allowed_tools?: string[] | null;  // 允许的工具；null/未设置 = 后端默认工具，[] = 不使用内置工具
   reflection_enabled?: boolean;     // 是否启用反思
   // MCP服务选择模式：all=全部启用的MCP服务, selected=指定服务, none=不使用MCP
@@ -160,6 +163,33 @@ export interface CustomAgent {
   config: CustomAgentConfig;
   created_at?: string;
   updated_at?: string;
+  // ===== 模型网关发布状态（M2-a/M3-1） =====
+  published?: boolean;            // 是否已发布为 OpenAI 兼容模型（/v1 可调用）
+  published_at?: string;          // 最近一次发布时间
+  gateway_scope?: string;         // 调用范围 private | org | tenant（缺省 tenant）
+  gateway_version?: number;       // 发布版本号（/v1/models meta.version），0=从未发布
+  deprecation_sunset?: string;    // 弃用时间（RFC3339），过后网关按未发布处理
+}
+
+// ===== 模型网关发布治理（M2-a / M3-1） =====
+export type GatewayPublishScope = 'private' | 'org' | 'tenant';
+// 网关工具策略：'' / 'all' 内部工具+调用方工具；'client_only' 仅调用方工具；
+// 'none' 忽略调用方工具定义（M1 行为）。
+export type GatewayToolPolicy = '' | 'all' | 'client_only' | 'none';
+
+// PATCH /agents/:id 的发布治理字段；仅在需要修改的字段上赋值。
+export interface GatewayPublishPayload {
+  published?: boolean;
+  published_scope?: GatewayPublishScope;
+  /** RFC3339 时间；显式 null 清除已设置的弃用时间 */
+  deprecation_sunset?: string | null;
+  gateway_tool_policy?: GatewayToolPolicy;
+}
+
+// 发布 / 下架智能体为 OpenAI 兼容模型，或调整发布治理（范围 / 弃用时间 / 工具策略）。
+// 重新发布会刷新配置快照并递增版本号；纯治理修改不影响版本号。
+export function publishAgent(id: string, data: GatewayPublishPayload) {
+  return patch<{ data: CustomAgent; message?: string }>(`/api/v1/agents/${id}`, data);
 }
 
 // 创建智能体请求

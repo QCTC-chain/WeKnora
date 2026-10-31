@@ -51,6 +51,18 @@ type CustomAgentService interface {
 	// a pointer to "" is an explicit clear.
 	UpdateAgent(ctx context.Context, agent *types.CustomAgent, avatar *string) (*types.CustomAgent, error)
 
+	// SetAgentPublished applies a gateway publish/unpublish with the M2-a
+	// governance semantics: publish freezes a config snapshot (published_config)
+	// and bumps published_version; published_scope narrows who may call it
+	// (private|org|tenant); deprecation_sunset marks the deprecated transition
+	// state (callable until the instant, then resolves as unpublished).
+	// Publishing validates that the agent's name stays unique among the
+	// tenant's published agents (case-insensitive, trimmed) so the name can
+	// serve as a /v1 model id; a conflict returns ErrAgentPublishedNameConflict.
+	// Built-in agents cannot be published: their rows may not exist locally
+	// and their config is registry-managed.
+	SetAgentPublished(ctx context.Context, id string, upd types.GatewayPublishUpdate) (*types.CustomAgent, error)
+
 	// DeleteAgent deletes an agent
 	// Parameters:
 	//   - ctx: Context information

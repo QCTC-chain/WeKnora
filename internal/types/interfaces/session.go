@@ -34,6 +34,14 @@ type SessionService interface {
 	// most recent QA request on this session. Best-effort: callers should log
 	// but not surface failures to the user.
 	UpdateSessionLastRequestState(ctx context.Context, sessionID string, state *types.SessionLastRequestState) error
+	// FindGatewayThreadSession resolves the M2-3 gateway continuation anchor:
+	// the most recently active gateway session for (tenant, owner, agent).
+	// Returns (nil, nil) when no live thread exists.
+	FindGatewayThreadSession(
+		ctx context.Context, tenantID uint64, ownerUserID, agentID string, activeAfter time.Time,
+	) (*types.Session, error)
+	// TouchGatewaySession slides a reused gateway thread's retention window.
+	TouchGatewaySession(ctx context.Context, sessionID string) error
 	// DeleteSession deletes a session
 	DeleteSession(ctx context.Context, id string) error
 	// BatchDeleteSessions deletes multiple sessions by IDs
@@ -140,4 +148,25 @@ type SessionRepository interface {
 	DeleteForkSnapshotLease(ctx context.Context, snapshotID string) error
 	// ListStaleForkSnapshotLeases returns leases older than olderThan.
 	ListStaleForkSnapshotLeases(ctx context.Context, olderThan time.Time) ([]*types.ForkSnapshotLease, error)
+	// ListExpiredGatewaySessions returns gateway-kind sessions (OpenAI
+	// compatible gateway audit sessions, kind="gateway") whose last update
+	// is older than olderThan, up to limit rows. The gateway session reaper
+	// deletes them after gateway.session_retention (docs §7.1).
+	ListExpiredGatewaySessions(ctx context.Context, olderThan time.Time, limit int) ([]*types.Session, error)
+	// FindGatewayThreadSession returns the most recently active gateway-kind
+	// session for (tenant, owner user, agent) whose updated_at is not older
+	// than activeAfter — the M2-3 continuation anchor. Returns (nil, nil)
+	// when no live thread exists.
+	FindGatewayThreadSession(
+		ctx context.Context, tenantID uint64, ownerUserID, agentID string, activeAfter time.Time,
+	) (*types.Session, error)
+	// TouchGatewaySession bumps updated_at on a gateway session so a reused
+	// (continued) thread keeps its sliding retention window. Best-effort for
+	// callers: log, don't fail the turn.
+	TouchGatewaySession(ctx context.Context, sessionID string) error
+	// DeleteGatewaySessionsByID soft-deletes gateway sessions by ID across
+	// all tenants. The reaper is the only caller and has no user context,
+	// so unlike Delete/BatchDelete this bypasses the per-user scope — it
+	// matches on kind=gateway in the reaper's listing, never raw user IDs.
+	DeleteGatewaySessionsByID(ctx context.Context, ids []string) (int64, error)
 }

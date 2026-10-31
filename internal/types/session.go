@@ -80,6 +80,12 @@ const SessionKindAssistant = "assistant"
 // SessionKindAgentDelegated retains a child transcript outside ordinary listings.
 const SessionKindAgentDelegated = "agent_delegated"
 
+// SessionKindGateway marks one-shot sessions created by the OpenAI-compatible
+// model gateway (/v1/chat/completions): one per request, kept for audit and
+// pruned by the retention task. The repository's kind=” filters already
+// keep it out of ordinary listings, so no migration is needed.
+const SessionKindGateway = "gateway"
+
 // IsValidSessionKind restricts API kinds to ordinary chats (empty) and assistant history.
 func IsValidSessionKind(kind string) bool {
 	return kind == "" || kind == SessionKindAssistant

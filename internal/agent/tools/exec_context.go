@@ -38,6 +38,14 @@ type ToolExecContext struct {
 	// Mode says whether the client can show and answer prompts; IM and
 	// MCP-server runs have no such surface.
 	Mode types.RunMode
+	// ClientBatch lists every client tool call of this round (M3-1): the
+	// first client call to execute raises one external_tool_call prompt
+	// carrying them all, so the gateway can return the whole batch to the
+	// API caller at once. Nil/empty outside gateway bridge rounds.
+	ClientBatch []types.ExternalToolCallSpec
+	// Bridge is the round's shared client-tool-bridge state; see
+	// ClientBridgeState.
+	Bridge *ClientBridgeState
 }
 
 // Attended reports whether a client can answer prompts now.

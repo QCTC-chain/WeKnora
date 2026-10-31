@@ -270,6 +270,12 @@ func (s *agentService) CreateAgentEngine(
 	s.registerSandboxFileTools(ctx, toolRegistry, sessionID, config)
 	s.registerWebPageFiles(ctx, toolRegistry, config, sessionID, assistantMessageID)
 	attachmentReader := s.registerAttachmentReader(ctx, toolRegistry, config, sessionID)
+	// Gateway client-tool passthrough (M3-1): register the caller's tools as
+	// suspend-on-call bridges, then apply the agent's gateway tool policy.
+	clientToolNames := s.registerClientTools(ctx, toolRegistry, config)
+	if config.GatewayToolPolicy == "client_only" && len(clientToolNames) > 0 {
+		toolRegistry.RestrictTools(clientToolNames)
+	}
 	// Advertise cached service summaries independently of @mentions. Concrete
 	// tool definitions are published after describe, before the next model request.
 	toolRegistry.PrepareMCPTools(ctx)
@@ -1608,6 +1614,11 @@ func withoutWikiWriteTools(allowed []string) []string {
 func (s *agentService) ValidateConfig(config *types.AgentConfig) error {
 	if config == nil {
 		return fmt.Errorf("config cannot be nil")
+	}
+	switch config.GatewayToolPolicy {
+	case "", "all", "client_only", "none":
+	default:
+		return fmt.Errorf("invalid gateway_tool_policy %q (all, client_only, none)", config.GatewayToolPolicy)
 	}
 
 	if config.MaxIterations < 0 {

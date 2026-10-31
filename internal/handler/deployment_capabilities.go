@@ -16,6 +16,7 @@ var DeploymentCapabilityKeys = []string{
 	"integrations.im",
 	"integrations.embed",
 	"integrations.api",
+	"integrations.gateway",
 	"integrations.mcpserver",
 	"settings.mcp",
 	"settings.websearch",
@@ -42,11 +43,14 @@ type DeploymentCapabilitiesData struct {
 
 // DeploymentFeatureAvailability mirrors injected backend handlers/services.
 type DeploymentFeatureAvailability struct {
-	Organizations         bool
-	Agents                bool
-	IM                    bool
-	Embed                 bool
-	API                   bool
+	Organizations bool
+	Agents        bool
+	IM            bool
+	Embed         bool
+	API           bool
+	// Gateway is the OpenAI-compatible model gateway (/v1); opt-in via
+	// gateway.enabled / GATEWAY_ENABLED.
+	Gateway               bool
 	MCPServer             bool
 	MCP                   bool
 	WebSearch             bool
@@ -121,6 +125,7 @@ func BuildDeploymentCapabilities(
 			"integrations.im":                  supportedDeploymentCapability(available.IM),
 			"integrations.embed":               supportedDeploymentCapability(available.Embed),
 			"integrations.api":                 supportedDeploymentCapability(available.API),
+			"integrations.gateway":             supportedDeploymentCapability(available.Gateway),
 			"integrations.mcpserver":           supportedDeploymentCapability(available.MCPServer),
 			"settings.mcp":                     supportedDeploymentCapability(available.MCP),
 			"settings.websearch":               supportedDeploymentCapability(available.WebSearch),

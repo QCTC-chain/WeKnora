@@ -17,6 +17,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/handler"
+	"github.com/Tencent/WeKnora/internal/handler/openai_compat"
 	"github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/mcpserver"
@@ -98,6 +99,7 @@ type RouterParams struct {
 	AutomationHandler            *handler.AutomationHandler
 	HostSandbox                  service.HostSandboxManager
 	OperationDispatcher          *operations.HandlerDispatcher
+	GatewayHandler               *openai_compat.GatewayHandler
 }
 
 // NewRouter 创建新的路由
@@ -193,6 +195,15 @@ func NewRouter(params RouterParams) *gin.Engine {
 	// Workspace MCP server surface (/mcp/:endpoint_id): bearer-token auth per
 	// endpoint, so it must precede the global Auth middleware.
 	RegisterMCPServerRoutes(r, params.MCPServer, params.MCPEndpointService, params.TenantService)
+
+	// OpenAI-compatible model gateway (/v1): API keys sent as a standard
+	// Bearer header, self-contained auth, must precede the global Auth
+	// middleware. Opt-in via gateway.enabled / GATEWAY_ENABLED.
+	if params.Config.Gateway.IsEnabled() {
+		RegisterOpenAICompatRoutes(
+			r, params.GatewayHandler, params.TenantService, params.UserService, params.TenantAPIKeyService,
+		)
+	}
 
 	// Short-lived capability URLs for IM and other clients that cannot attach
 	// WeKnora authentication headers.

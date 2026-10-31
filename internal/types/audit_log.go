@@ -186,6 +186,27 @@ const (
 	AuditActionFAQImportStarted   AuditAction = "faq.import_started"
 	AuditActionFAQImportCompleted AuditAction = "faq.import_completed"
 	AuditActionFAQImportFailed    AuditAction = "faq.import_failed"
+
+	// AuditActionGatewayCompletion fires once per executed
+	// OpenAI-compatible gateway turn (POST /v1/chat/completions, M1
+	// milestones G3/G4). Details carry the credential fingerprint (key id
+	// + name, never the raw key), resolved agent, the caller's raw model
+	// string, stream flag, accumulated token usage, duration and end
+	// reason. Request bodies stay out of the audit trail unless the
+	// operator opts in via gateway.audit_payload (docs §6).
+	AuditActionGatewayCompletion AuditAction = "gateway.completion"
+
+	// AuditActionGatewayPublish fires when an agent is published to the
+	// gateway (M2-a governance). Details carry the operator, the frozen
+	// snapshot version, the chosen scope and any deprecation sunset.
+	AuditActionGatewayPublish AuditAction = "gateway.publish"
+	// AuditActionGatewayUnpublish fires when an agent leaves the gateway
+	// (manual unpublish; sunset expiry resolves lazily and is NOT audited —
+	// there is no operator action to attribute).
+	AuditActionGatewayUnpublish AuditAction = "gateway.unpublish"
+	// AuditActionGatewayGovernance fires for publish-scope or deprecation
+	// changes that do not flip the published bit.
+	AuditActionGatewayGovernance AuditAction = "gateway.governance"
 )
 
 // AuditOutcome separates asynchronous acceptance from terminal business

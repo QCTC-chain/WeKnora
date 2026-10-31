@@ -99,6 +99,9 @@ type AgentEngine struct {
 	suspendRequest []byte
 	// collaborationOnlySuspension limits suspension to collaboration waits.
 	collaborationOnlySuspension bool
+	// clientToolSuspensionOnly limits suspension to gateway client-tool
+	// calls (M3-1 bridge runs).
+	clientToolSuspensionOnly bool
 	// mode: whether the client renders prompt cards and can answer them.
 	mode     types.RunMode
 	progress turnProgress

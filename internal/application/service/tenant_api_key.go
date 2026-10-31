@@ -72,10 +72,16 @@ func (s *tenantAPIKeyService) CreateAPIKey(
 		KnowledgeBaseIDs: normalizeAPIKeyIDs(req.KnowledgeBaseIDs),
 		Capabilities:     capabilities,
 		ExpiresAt:        expiresAt,
+		// M2-b gateway grants/quotas.
+		AgentGrants:        types.NormalizeAPIKeyAgentGrants(req.AgentGrants),
+		DailyTokenBudget:   req.DailyTokenBudget,
+		DailyRequestBudget: req.DailyRequestBudget,
 	}
 	if key.FullAccess {
 		key.KnowledgeBaseIDs = nil
 		key.Capabilities = nil
+		// Gateway grants/quotas stay meaningful on full-access keys (the
+		// gateway ignores FullAccess; chat capability + grants rule there).
 	}
 	if err := s.repo.CreateAPIKey(ctx, key); err != nil {
 		return nil, err
@@ -155,11 +161,14 @@ func (s *tenantAPIKeyService) UpdateAPIKey(
 		expiresAt = &utc
 	}
 	key := &types.TenantAPIKey{
-		Name:             name,
-		FullAccess:       req.FullAccess,
-		KnowledgeBaseIDs: normalizeAPIKeyIDs(req.KnowledgeBaseIDs),
-		Capabilities:     capabilities,
-		ExpiresAt:        expiresAt,
+		Name:               name,
+		FullAccess:         req.FullAccess,
+		KnowledgeBaseIDs:   normalizeAPIKeyIDs(req.KnowledgeBaseIDs),
+		Capabilities:       capabilities,
+		ExpiresAt:          expiresAt,
+		AgentGrants:        types.NormalizeAPIKeyAgentGrants(req.AgentGrants),
+		DailyTokenBudget:   req.DailyTokenBudget,
+		DailyRequestBudget: req.DailyRequestBudget,
 	}
 	if key.FullAccess {
 		key.KnowledgeBaseIDs = nil

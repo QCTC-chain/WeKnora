@@ -221,6 +221,11 @@ type QARequest struct {
 	// RunNote is appended to the system prompt of this run only: how the
 	// run was started, for runs nobody is watching.
 	RunNote string
+	// ClientTools are the gateway caller's tool definitions (M3-1): the run
+	// registers them as executable-looking tools whose calls suspend the run
+	// until the external client returns results through the gateway. Empty
+	// keeps ordinary behavior. Gateway callers only.
+	ClientTools []ClientToolSpec `json:"-"`
 }
 
 // AgentResume is what a resumed run continues from.

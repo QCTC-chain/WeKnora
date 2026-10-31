@@ -779,6 +779,11 @@ definitions:
           Per-field "configured?" map. Omitted for builtin models unless the
           caller is a system administrator. See MCPServiceResponse.Credentials.
         type: object
+      default_for:
+        items:
+          type: string
+        type: array
+        x-agent: true
       description:
         type: string
         x-agent: true
@@ -1690,6 +1695,10 @@ definitions:
     - faq.import_started
     - faq.import_completed
     - faq.import_failed
+    - gateway.completion
+    - gateway.publish
+    - gateway.unpublish
+    - gateway.governance
     type: string
     x-enum-varnames:
     - AuditActionMemberAdded
@@ -1754,6 +1763,10 @@ definitions:
     - AuditActionFAQImportStarted
     - AuditActionFAQImportCompleted
     - AuditActionFAQImportFailed
+    - AuditActionGatewayCompletion
+    - AuditActionGatewayPublish
+    - AuditActionGatewayUnpublish
+    - AuditActionGatewayGovernance
   github_com_Tencent_WeKnora_internal_types.AuditLog:
     properties:
       action:
@@ -2751,6 +2764,37 @@ definitions:
         description: Description of the agent
         type: string
         x-agent: true
+      gateway_scope:
+        description: |-
+          GatewayScope narrows WHO may call the published agent through the
+          gateway. Empty means "tenant" (the M1 default, kept for legacy rows).
+            private: only callers whose principal user is the agent creator;
+            org:     plus every tenant that shares an organization the agent is
+                     published to (the existing agent_shares system; a share only
+                     counts while both the source and caller tenants remain members);
+            tenant:  every gateway credential of the agent's workspace.
+        type: string
+      gateway_snapshot:
+        allOf:
+        - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.CustomAgentConfig'
+        description: |-
+          GatewaySnapshot is the agent config frozen at publish time. The
+          gateway resolves and executes this snapshot, so editing the live agent
+          no longer changes the published face until the next publish. Nil on
+          legacy rows (M1 published before governance) means "use the live
+          config" — publishing again under M2 freezes one.
+      gateway_sunset:
+        description: |-
+          GatewaySunset marks the "deprecated" transition state: while set and
+          in the future the agent stays callable but every gateway response
+          carries `X-WeKnora-Deprecation: sunset=<RFC3339>`; once the instant
+          passes it resolves as unpublished (lazy check — no cron needed).
+        type: string
+      gateway_version:
+        description: |-
+          GatewayVersion is the publish snapshot version: bumped on every
+          publish, exposed as /v1/models meta.version. Zero = never published.
+        type: integer
       id:
         description: |-
           Unique identifier of the agent (composite primary key with TenantID)
@@ -2766,6 +2810,17 @@ definitions:
         description: Name of the agent
         type: string
         x-agent: true
+      published:
+        description: |-
+          Published marks the agent as callable through the OpenAI-compatible
+          model gateway (GET /v1/models, POST /v1/chat/completions). Default
+          false: an agent only becomes an externally selectable "model" after an
+          explicit publish. Unpublishing removes it from /v1/models immediately;
+          in-flight gateway requests already past resolution are not affected.
+        type: boolean
+      published_at:
+        description: PublishedAt records the last publish instant; cleared on unpublish.
+        type: string
       tenant_id:
         description: Tenant ID (composite primary key with ID)
         type: integer
@@ -2900,6 +2955,17 @@ definitions:
         description: FAQ score boost multiplier - FAQ results score multiplied by
           this factor
         type: number
+      gateway_tool_policy:
+        description: |-
+          ===== Model Gateway Settings =====
+          GatewayToolPolicy narrows what a gateway (OpenAI-compat) run of this
+          agent may use (M3-1/M3-2). Empty or "all": internal tools plus the
+          caller's client tools; "client_only": client tools only; "none":
+          client tool definitions are ignored (M1 behavior). Frozen into the
+          publish snapshot like every other config field.
+        type: string
+        x-agent: true
+        x-agent-detail: true
       history_turns:
         description: Number of history turns to keep in context. Quick-answer only;
           smart-reasoning sizes history by context window
@@ -3191,6 +3257,30 @@ definitions:
         type: string
       updated_at:
         description: Last update timestamp
+        type: string
+    type: object
+  github_com_Tencent_WeKnora_internal_types.DefaultSettings:
+    properties:
+      asr_model_id:
+        description: ASRModelID is the default ASR model.
+        type: string
+      chat_model_id:
+        description: ChatModelID is the default KnowledgeQA model.
+        type: string
+      embedding_model_id:
+        description: EmbeddingModelID is the default Embedding model.
+        type: string
+      rerank_model_id:
+        description: RerankModelID is the default Rerank model.
+        type: string
+      utility_model_id:
+        description: |-
+          UtilityModelID is the KnowledgeQA model for short generation tasks
+          such as writing MCP usage instructions. Empty follows the chat default.
+        type: string
+      vlm_model_id:
+        description: VLMModelID is the default VLLM or vision-capable KnowledgeQA
+          model.
         type: string
     type: object
   github_com_Tencent_WeKnora_internal_types.DockerSandboxConfig:
@@ -8770,6 +8860,11 @@ definitions:
         - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.CredentialsConfig'
         description: 'Credentials config: third-party provider credentials (e.g. WeKnoraCloud
           AppID/AppSecret)'
+      default_settings:
+        allOf:
+        - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.DefaultSettings'
+        description: 'Default settings: the workspace''s default model for each type
+          and purpose'
       default_storage_backend_id:
         description: DefaultStorageBackendID is the workspace default concrete storage
           instance.
@@ -9557,6 +9652,16 @@ definitions:
         description: 需要重新初始化的原因
         type: string
     type: object
+  github_com_Tencent_WeKnora_internal_types.WebSearchClients:
+    properties:
+      fetch:
+        description: Fetch is the provider type whose API reads pages, or "local"
+          for WeKnora's own reader.
+        type: string
+      search:
+        description: Search is the provider type whose API runs searches.
+        type: string
+    type: object
   github_com_Tencent_WeKnora_internal_types.WebSearchConfig:
     properties:
       api_key:
@@ -9722,6 +9827,11 @@ definitions:
     - WebSearchProviderTypeDeepSeek
   github_com_Tencent_WeKnora_internal_types.WebSearchProviderTypeInfo:
     properties:
+      clients:
+        allOf:
+        - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.WebSearchClients'
+        description: Search and fetch readers registered for this type; nil when the
+          type is not registered.
       config_fields:
         description: Provider-specific non-secret configuration rendered dynamically
           by the frontend.
@@ -12412,8 +12522,36 @@ definitions:
         - smart-reasoning
         type: string
         x-agent: true
+      deprecation_sunset:
+        description: |-
+          swaggertype string keeps the operations catalog (which only binds
+          scalar/array shapes) working: the wire accepts an RFC3339 string or
+          explicit null (clears the sunset), parsed by the publish update.
+
+          DeprecationSunset marks the deprecated transition state: an RFC3339
+          instant until which the published agent stays callable (responses carry
+          X-WeKnora-Deprecation); past the instant it resolves as unpublished.
+          JSON null clears an existing sunset. Requires the sunset to be in the
+          future when set alongside publish.
+        format: date-time
+        type: string
+        x-agent: true
       description:
         description: What the agent is for
+        type: string
+        x-agent: true
+      gateway_tool_policy:
+        description: |-
+          GatewayToolPolicy selects what the gateway exposes to callers of the
+          published model (M3-1): ""/"all" runs internal and bridged client
+          tools, "client_only" hides internal tools, "none" restores M1 behavior
+          (tools[] ignored and counted). Omitted keeps the stored value; the
+          policy also freezes into each publish snapshot.
+        enum:
+        - ""
+        - all
+        - client_only
+        - none
         type: string
         x-agent: true
       kb_selection_mode:
@@ -12461,6 +12599,25 @@ definitions:
         x-agent: true
       name:
         description: Agent name
+        type: string
+        x-agent: true
+      published:
+        description: |-
+          Publish (true) or unpublish (false) the agent for the OpenAI-compatible
+          model gateway (/v1). Publishing rejects a name that another published
+          agent in the workspace already uses (case-insensitive).
+        type: boolean
+        x-agent: true
+      published_scope:
+        description: |-
+          PublishedScope narrows who may call the published agent on the gateway
+          (M2-a): private (creator's credentials only), org (plus tenants sharing
+          an org the agent is published to) or tenant (whole workspace; default).
+          Omitted keeps the stored value; a first publish defaults to tenant.
+        enum:
+        - private
+        - org
+        - tenant
         type: string
         x-agent: true
       selected_skills:
@@ -14104,6 +14261,10 @@ definitions:
     type: object
   internal_handler.tenantAPIKeyCreateResponse:
     properties:
+      agent_grants:
+        items:
+          type: string
+        type: array
       api_key:
         type: string
       capabilities:
@@ -14112,6 +14273,10 @@ definitions:
         type: array
       created_at:
         type: string
+      daily_request_budget:
+        type: integer
+      daily_token_budget:
+        type: integer
       expires_at:
         type: string
       full_access:
@@ -14133,6 +14298,10 @@ definitions:
     type: object
   internal_handler.tenantAPIKeyResponse:
     properties:
+      agent_grants:
+        items:
+          type: string
+        type: array
       api_key:
         type: string
       capabilities:
@@ -14141,6 +14310,10 @@ definitions:
         type: array
       created_at:
         type: string
+      daily_request_budget:
+        type: integer
+      daily_token_budget:
+        type: integer
       expires_at:
         type: string
       full_access:
@@ -14205,6 +14378,347 @@ definitions:
         minLength: 1
         type: string
         x-agent: true
+    type: object
+  internal_handler_openai_compat.AnthropicMessagesRequest:
+    properties:
+      max_tokens:
+        description: required by Anthropic; the agent owns the budget
+        type: integer
+      messages:
+        items:
+          properties:
+            content:
+              type: object
+            role:
+              description: user | assistant
+              type: string
+          type: object
+        type: array
+      metadata:
+        properties:
+          user_id:
+            description: Anthropic's external user id; feeds the M2-3 derived thread
+              key.
+            type: string
+        type: object
+      model:
+        type: string
+      stream:
+        type: boolean
+      system:
+        description: string | [{type:"text",text}]
+        type: object
+      tools:
+        description: |-
+          Tools are the caller's Anthropic tool definitions ({name, description,
+          input_schema}); converted to function specs and bridged like the
+          OpenAI shell's tools[] (gateway_tool_policy "none" ignores them).
+        items:
+          type: object
+        type: array
+    type: object
+  internal_handler_openai_compat.ChatCompletionChoice:
+    properties:
+      finish_reason:
+        description: '"stop" | "tool_calls"'
+        type: string
+      index:
+        type: integer
+      message:
+        $ref: '#/definitions/internal_handler_openai_compat.RespMessage'
+    type: object
+  internal_handler_openai_compat.ChatCompletionRequest:
+    properties:
+      messages:
+        description: |-
+          Messages is the conversation so far; rendered into a single gateway
+          turn (docs/design/agent-model-gateway-m1.md §7.2).
+        items:
+          $ref: '#/definitions/internal_handler_openai_compat.ChatMessage'
+        type: array
+      model:
+        description: |-
+          Model is the published agent: its UUID, or its name (unique among the
+          workspace's published agents).
+        type: string
+      stream:
+        description: Stream selects SSE chunking; false aggregates the full answer.
+        type: boolean
+      stream_options:
+        allOf:
+        - $ref: '#/definitions/internal_handler_openai_compat.StreamOptions'
+        description: |-
+          StreamOptions is accepted for wire compatibility; only include_usage
+          matters and usage is always included.
+      tool_choice:
+        type: object
+      tools:
+        description: |-
+          Tools declares the caller's client tools (M3-1): function tools are
+          bridged into the run — the model's calls come back as
+          finish_reason="tool_calls", and the next request carries tool results
+          that resume the run. gateway_tool_policy "none" ignores them instead
+          (counted in meta.client_tools_ignored).
+        items:
+          $ref: '#/definitions/internal_handler_openai_compat.ClientToolDefinition'
+        type: array
+      user:
+        description: User is an opaque caller identifier, forwarded to audit logs
+          only.
+        type: string
+    type: object
+  internal_handler_openai_compat.ChatCompletionResponse:
+    properties:
+      choices:
+        items:
+          $ref: '#/definitions/internal_handler_openai_compat.ChatCompletionChoice'
+        type: array
+      created:
+        type: integer
+      id:
+        type: string
+      meta:
+        allOf:
+        - $ref: '#/definitions/internal_handler_openai_compat.CompletionMeta'
+        description: |-
+          Meta carries non-standard WeKnora extensions (warnings, ignored
+          params, tool-ignored count). OpenAI clients ignore unknown fields.
+      model:
+        description: the caller's model string, echoed
+        type: string
+      object:
+        description: '"chat.completion"'
+        type: string
+      usage:
+        $ref: '#/definitions/internal_handler_openai_compat.Usage'
+    type: object
+  internal_handler_openai_compat.ChatMessage:
+    properties:
+      content:
+        $ref: '#/definitions/internal_handler_openai_compat.ContentUnion'
+      name:
+        description: Name is the legacy participant name; kept in the history transcript.
+        type: string
+      role:
+        description: system / developer / user / assistant / tool
+        type: string
+      tool_call_id:
+        description: ToolCallID ties a tool result to a prior tool call (rendered
+          as text).
+        type: string
+      tool_calls:
+        description: |-
+          ToolCalls on assistant messages are recorded textually in the history
+          transcript; the gateway never executes client tools.
+        items:
+          $ref: '#/definitions/internal_handler_openai_compat.ClientToolCall'
+        type: array
+    type: object
+  internal_handler_openai_compat.ClientToolCall:
+    properties:
+      function:
+        $ref: '#/definitions/internal_handler_openai_compat.ClientToolFnCall'
+      id:
+        type: string
+      type:
+        type: string
+    type: object
+  internal_handler_openai_compat.ClientToolDefinition:
+    properties:
+      function:
+        $ref: '#/definitions/internal_handler_openai_compat.ClientToolFnSpec'
+      type:
+        description: '"function"'
+        type: string
+    type: object
+  internal_handler_openai_compat.ClientToolFnCall:
+    properties:
+      arguments:
+        type: string
+      name:
+        type: string
+    type: object
+  internal_handler_openai_compat.ClientToolFnSpec:
+    properties:
+      description:
+        type: string
+      name:
+        type: string
+      parameters:
+        type: object
+    type: object
+  internal_handler_openai_compat.CompletionMeta:
+    properties:
+      agent_id:
+        description: AgentID is the resolved agent UUID.
+        type: string
+      bridge_pending:
+        description: |-
+          BridgePending marks a finish_reason="tool_calls" response (M3-1): the
+          run is suspended until the caller returns tool results carrying the
+          same call IDs.
+        type: boolean
+      client_tools_ignored:
+        description: |-
+          ClientToolsIgnored counts received-but-not-bridged client tools (only
+          set when the agent's gateway_tool_policy is "none").
+        type: integer
+      ignored_params:
+        description: IgnoredParams echoes the sampling params the gateway dropped.
+        items:
+          type: string
+        type: array
+      session_id:
+        description: SessionID is the temporary gateway session; findable in the web
+          UI.
+        type: string
+      warnings:
+        description: Warnings reports renderer adjustments (dropped images, timeouts).
+        items:
+          type: string
+        type: array
+    type: object
+  internal_handler_openai_compat.ContentPart:
+    properties:
+      image_url:
+        $ref: '#/definitions/internal_handler_openai_compat.ImageURLPo'
+      text:
+        type: string
+      type:
+        description: '"text" | "image_url"'
+        type: string
+    type: object
+  internal_handler_openai_compat.ContentUnion:
+    properties:
+      parts:
+        items:
+          $ref: '#/definitions/internal_handler_openai_compat.ContentPart'
+        type: array
+      text:
+        type: string
+    type: object
+  internal_handler_openai_compat.ErrorBody:
+    properties:
+      code:
+        type: string
+      message:
+        type: string
+      param:
+        type: string
+      type:
+        type: string
+    type: object
+  internal_handler_openai_compat.ErrorEnvelope:
+    properties:
+      error:
+        $ref: '#/definitions/internal_handler_openai_compat.ErrorBody'
+    type: object
+  internal_handler_openai_compat.ImageURLPo:
+    properties:
+      detail:
+        type: string
+      url:
+        type: string
+    type: object
+  internal_handler_openai_compat.ModelEntry:
+    properties:
+      created:
+        description: Created is the publish instant (unix seconds); 0 when unknown.
+        type: integer
+      id:
+        description: |-
+          ID is the agent UUID — the canonical model id. The agent's name is
+          accepted as an alias on completions but the UUID is what clients should
+          persist.
+        type: string
+      meta:
+        allOf:
+        - $ref: '#/definitions/internal_handler_openai_compat.ModelMeta'
+        description: |-
+          Meta carries WeKnora-specific display hints. Non-standard: OpenAI
+          clients ignore unknown fields, WeKnora-aware UIs may render them.
+      object:
+        description: Object is always "model".
+        type: string
+      owned_by:
+        description: OwnedBy is always "weknora".
+        type: string
+    type: object
+  internal_handler_openai_compat.ModelListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/internal_handler_openai_compat.ModelEntry'
+        type: array
+      object:
+        description: always "list"
+        type: string
+    type: object
+  internal_handler_openai_compat.ModelMeta:
+    properties:
+      agent_mode:
+        description: |-
+          AgentMode is quick-answer or smart-reasoning (from the publish
+          snapshot when one exists).
+        type: string
+      agent_name:
+        description: |-
+          AgentName is the human-readable agent name (also usable as a model
+          alias on completions).
+        type: string
+      deprecated:
+        description: |-
+          Deprecated marks the deprecation transition (M2-a): the model is
+          callable but scheduled for removal; pair with sunset_at.
+        type: boolean
+      description:
+        description: Description is the agent's description, trimmed for list payloads.
+        type: string
+      is_builtin:
+        description: IsBuiltin marks workspace built-in agents.
+        type: boolean
+      scope:
+        description: 'Scope is the published_scope: private | org | tenant (M2-a).'
+        type: string
+      sunset_at:
+        description: |-
+          SunsetAt is the RFC3339 instant after which the model resolves as
+          unpublished (M2-a deprecation sunset).
+        type: string
+      version:
+        description: |-
+          Version is the publish snapshot version (M2-a): bumped on every
+          publish; the value /v1/chat/completions executes.
+        type: integer
+    type: object
+  internal_handler_openai_compat.RespMessage:
+    properties:
+      content:
+        type: string
+      role:
+        description: '"assistant"'
+        type: string
+      tool_calls:
+        description: |-
+          ToolCalls is set on M3-1 bridge responses (finish_reason
+          "tool_calls"): the calls the client must execute and return.
+        items:
+          $ref: '#/definitions/internal_handler_openai_compat.ClientToolCall'
+        type: array
+    type: object
+  internal_handler_openai_compat.StreamOptions:
+    properties:
+      include_usage:
+        type: boolean
+    type: object
+  internal_handler_openai_compat.Usage:
+    properties:
+      completion_tokens:
+        type: integer
+      prompt_tokens:
+        type: integer
+      total_tokens:
+        type: integer
     type: object
   internal_handler_session.AttachmentUpload:
     properties:
@@ -14954,10 +15468,11 @@ paths:
       - application/json
       description: |-
         只修改请求中出现的字段，其余配置保持不变。
-        支持名称、描述、运行模式、系统提示词、对话模型、知识库、MCP、技能范围、联网搜索、多轮对话。
+        支持名称、描述、运行模式、系统提示词、对话模型、知识库、MCP、技能范围、联网搜索、多轮对话、发布开关。
         agent_mode 取 quick-answer 或 smart-reasoning。MCP 与技能只在 smart-reasoning 下运行，切到该模式会打开多轮对话。
         传 knowledge_bases、mcp_services 或 selected_skills 而不传对应模式时，切换为 selected。
         技能模式 all/none 清空技能列表；启用技能须先在编辑器选择沙箱，selected 名称须可用，否则返回 400。
+        published=true 将智能体发布到 OpenAI 兼容模型网关(/v1/models);发布要求智能体名称在已发布集合内唯一(忽略大小写)，冲突返回 409。
       parameters:
       - description: 智能体ID
         in: path
@@ -29237,7 +29752,10 @@ paths:
     get:
       consumes:
       - application/json
-      description: 获取空间级别的KV配置（支持web-search-config、prompt-templates、parser-engine-config、storage-engine-config、chat-history-config、retrieval-config）
+      description: |-
+        获取空间级别的KV配置。支持 web-search-config、prompt-templates、parser-engine-config、
+        storage-engine-config、chat-history-config、retrieval-config、memory-config、
+        assistant-config、default-settings。
       parameters:
       - description: 配置键名
         in: path
@@ -29265,7 +29783,9 @@ paths:
     put:
       consumes:
       - application/json
-      description: 更新空间级别的KV配置（支持web-search-config、parser-engine-config、storage-engine-config、chat-history-config、retrieval-config）
+      description: |-
+        更新空间级别的KV配置。支持 web-search-config、parser-engine-config、storage-engine-config、
+        chat-history-config、retrieval-config、memory-config、assistant-config、default-settings。
       parameters:
       - description: 配置键名
         in: path
@@ -29460,6 +29980,153 @@ paths:
       summary: Unstar a resource
       tags:
       - User
+  /v1/chat/completions:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        OpenAI 兼容端点:把一次 chat/completions 请求作为单轮提问发给
+        指定的已发布智能体。messages 数组整体折叠为一轮 query(调用方指令 +
+        对话历史 + 本次问题),每次调用创建 Kind=gateway 的临时会话,
+        跑完留在库中供审计(默认 72h 后由回收任务清理)。tools[] 中的
+        function 定义按智能体 gateway_tool_policy 处理:默认桥接为客户端
+        工具(模型调用时以 finish_reason="tool_calls" 挂起,续轮带 tool
+        消息恢复运行),策略为 none 时计数忽略并回显 meta.client_tools_ignored;
+        temperature 等采样参数以智能体配置为准。
+        stream=true 走 SSE(chat.completion.chunk + [DONE]),
+        首个内容前每 15s 输出 keep-alive 注释行;stream=false 聚合返回。
+        每 key 并发默认上限 3,超限立即 429(concurrency_limit)。
+      parameters:
+      - description: 对话补全请求
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handler_openai_compat.ChatCompletionRequest'
+      produces:
+      - application/json
+      - text/event-stream
+      responses:
+        "200":
+          description: 补全结果(非流式)
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ChatCompletionResponse'
+        "400":
+          description: 请求不合法
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ErrorEnvelope'
+        "404":
+          description: model 不存在或未发布
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ErrorEnvelope'
+        "429":
+          description: 每 key 并发超限
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ErrorEnvelope'
+        "500":
+          description: 智能体运行失败
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ErrorEnvelope'
+      security:
+      - ApiKeyAuth: []
+      summary: 网关对话补全
+      tags:
+      - 模型网关
+  /v1/messages:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        以 Anthropic Messages 协议调用已发布的智能体(system/messages/content blocks,SSE 事件流)。
+        tools(input_schema)按智能体 gateway_tool_policy 桥接:模型调用时返回
+        stop_reason="tool_use" + tool_use 块,续轮以 tool_result 块恢复运行。
+      parameters:
+      - description: Anthropic Messages 请求
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handler_openai_compat.AnthropicMessagesRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: message 对象或 SSE 事件流
+          headers:
+            X-WeKnora-Agent-Id:
+              type: string
+            X-WeKnora-Session-Id:
+              type: string
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: invalid_request_error
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: authentication_error
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: not_found_error
+          schema:
+            additionalProperties: true
+            type: object
+        "429":
+          description: rate_limit_error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - ApiKeyAuth: []
+      summary: Anthropic 兼容对话
+      tags:
+      - 网关(Anthropic 兼容)
+  /v1/metrics:
+    get:
+      description: Prometheus 文本格式的网关运行指标(请求计数、TTFB、内部轮数、token 放大比、翻译丢弃量、429/404 计数)
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: Prometheus exposition
+          schema:
+            type: string
+      security:
+      - ApiKeyAuth: []
+      summary: 网关指标
+      tags:
+      - 网关(可观测性)
+  /v1/models:
+    get:
+      description: |-
+        OpenAI 兼容端点:列出当前空间已发布(可通过网关调用)的智能体。
+        每个智能体呈现为一个 model,id 为智能体 UUID;meta.agent_name
+        同时可作为 chat/completions 的 model 别名。
+        鉴权使用 WeKnora API key(Authorization: Bearer 或 X-API-Key,需要 chat 能力位)。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 模型列表
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ModelListResponse'
+        "401":
+          description: 缺少或无效 API key
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ErrorEnvelope'
+        "403":
+          description: API key 缺少 chat 能力位
+          schema:
+            $ref: '#/definitions/internal_handler_openai_compat.ErrorEnvelope'
+      security:
+      - ApiKeyAuth: []
+      summary: 网关模型列表
+      tags:
+      - 模型网关
   /vector-stores:
     get:
       description: List all vector stores for the current workspace, including environment-configured
