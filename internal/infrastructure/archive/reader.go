@@ -35,6 +35,9 @@ type Limits struct {
 	MaxExpandedBytes int64
 	// MaxSingleEntryBytes caps one entry's uncompressed size.
 	MaxSingleEntryBytes int64
+	// MaxImageBytes caps one referenced image's bytes when a manifest is
+	// built. Zero falls back to the upload default (maxImageBytes).
+	MaxImageBytes int64
 }
 
 // DefaultLimits returns the production limits for knowledge archives.
@@ -44,7 +47,34 @@ func DefaultLimits() Limits {
 		MaxEntries:          utils.GetMaxArchiveEntries(),
 		MaxExpandedBytes:    512 << 20, // 512 MiB, same ceiling as batch download
 		MaxSingleEntryBytes: 100 << 20, // 100 MiB, matches the document-wide inline image budget
+		MaxImageBytes:       maxImageBytes,
 	}
+}
+
+// LocalImportLimits returns the relaxed, finite limits for the
+// container-local bulk zip import (the `import-archives` subcommand). The
+// mounted-folder path has no HTTP upload frontier, so these replace the
+// upload caps: defaults are several times the upload ceilings — big,
+// image-heavy archives pass, runaway extraction still cannot — and every
+// value is operator-tunable via the LOCAL_IMPORT_* env variables.
+func LocalImportLimits() Limits {
+	return Limits{
+		MaxDocuments:        utils.GetLocalImportMaxDocuments(),
+		MaxEntries:          utils.GetLocalImportMaxEntries(),
+		MaxExpandedBytes:    utils.GetLocalImportMaxExpandedSizeMB() << 20,
+		MaxSingleEntryBytes: utils.GetLocalImportMaxSingleEntrySizeMB() << 20,
+		MaxImageBytes:       utils.GetLocalImportMaxImageSizeMB() << 20,
+	}
+}
+
+// imageByteLimit returns the per-image cap to apply when building a
+// manifest, falling back to the upload default for zero-value Limits
+// (constructed directly in tests or by callers predating the field).
+func (l Limits) imageByteLimit() int64 {
+	if l.MaxImageBytes > 0 {
+		return l.MaxImageBytes
+	}
+	return maxImageBytes
 }
 
 // Errors surfaced by Open and Read. They are value-tested by callers that
@@ -61,6 +91,20 @@ var (
 type SkippedEntry struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
+}
+
+// ArchiveSource is the read view BuildManifest needs: normalized entry
+// lookup over an archive-like package. *Archive (zip) and *DirectoryArchive
+// (an extracted package folder) both implement it, so one manifest/import
+// pipeline serves uploads and container-local folder imports alike.
+// imageByteLimit is unexported because implementations live in this package.
+type ArchiveSource interface {
+	Names() []string
+	Has(name string) bool
+	Read(name string) ([]byte, error)
+	Skipped() []SkippedEntry
+	imageByteLimit() int64
+	documentLimit() int
 }
 
 // Archive is an opened, safety-checked zip. Entry names are normalized to
@@ -147,6 +191,16 @@ func (a *Archive) Skipped() []SkippedEntry {
 	out := make([]SkippedEntry, len(a.skipped))
 	copy(out, a.skipped)
 	return out
+}
+
+// imageByteLimit exposes the manifest-time per-image cap (ArchiveSource).
+func (a *Archive) imageByteLimit() int64 {
+	return a.limits.imageByteLimit()
+}
+
+// documentLimit exposes the per-archive document cap (ArchiveSource).
+func (a *Archive) documentLimit() int {
+	return a.limits.MaxDocuments
 }
 
 // Read loads one entry with the archive's byte budgets enforced. Reads are

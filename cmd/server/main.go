@@ -43,6 +43,13 @@ import (
 )
 
 func main() {
+	// The import-archives subcommand is an operator-only bulk import from a
+	// container-local directory (see import_archives.go). It shares the
+	// app's DI container but never starts the HTTP server or workers.
+	if len(os.Args) > 1 && os.Args[1] == "import-archives" {
+		os.Exit(runImportArchives(os.Args[2:]))
+	}
+
 	// Load dotenv configuration before any container provider reads it.
 	// Explicit ENV_FILE is honored on every build; automatic .env.lite
 	// discovery is scoped to Lite builds (internal/handler.Edition is

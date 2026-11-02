@@ -46,7 +46,7 @@ func TestStoreArchiveImagesRewritesAndCounts(t *testing.T) {
 		[]string{"images/gone.png"},
 	)
 
-	rewritten, stored, warnings, err := svc.storeArchiveImages(context.Background(), fake, 7, doc)
+	rewritten, stored, _, warnings, err := svc.storeArchiveImages(context.Background(), fake, 7, doc, archiveDocumentOptions{})
 	if err != nil {
 		t.Fatalf("storeArchiveImages: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestStoreArchiveImagesPerDocumentCap(t *testing.T) {
 		doc.Images = append(doc.Images, archive.ImageFile{ArchivePath: path, Name: path, Data: data, Refs: []string{path}})
 	}
 
-	rewritten, stored, warnings, err := svc.storeArchiveImages(context.Background(), fake, 7, doc)
+	rewritten, stored, _, warnings, err := svc.storeArchiveImages(context.Background(), fake, 7, doc, archiveDocumentOptions{})
 	if err != nil {
 		t.Fatalf("storeArchiveImages: %v", err)
 	}
@@ -162,4 +162,66 @@ func TestImportArchiveAttachmentSkipsImageHandling(t *testing.T) {
 	if enqueuer.calls != 1 {
 		t.Fatalf("enqueue calls = %d, want 1", enqueuer.calls)
 	}
+}
+
+// TestStoreArchiveImagesLocalImportOptions pins the two knobs only the
+// container-local bulk import sets: a raised per-document stored-image cap,
+// and the parse-budget warning that fires (without relaxing the parser
+// budgets) when a document exceeds what the parse pipeline will inline.
+func TestStoreArchiveImagesLocalImportOptions(t *testing.T) {
+	build := func(n int) (*knowledgeService, *fakeFileService, *archive.Document) {
+		svc := &knowledgeService{}
+		fake := &fakeFileService{}
+		content := strings.Builder{}
+		images := map[string][]byte{}
+		for i := 0; i < n; i++ {
+			name := "images/img" + strconv.Itoa(i) + ".png"
+			content.WriteString("![" + strconv.Itoa(i) + "](" + name + ")\n")
+			images[name] = []byte{byte(i % 255)}
+		}
+		doc := archiveDoc(content.String(), images, nil)
+		return svc, fake, doc
+	}
+
+	t.Run("raised cap stores more than the upload default", func(t *testing.T) {
+		svc, fake, doc := build(maxArchiveDocumentImages + 5)
+		opts := archiveDocumentOptions{maxImagesPerDocument: maxArchiveDocumentImages + 5}
+		_, stored, _, warnings, err := svc.storeArchiveImages(context.Background(), fake, 7, doc, opts)
+		if err != nil {
+			t.Fatalf("storeArchiveImages: %v", err)
+		}
+		if stored != maxArchiveDocumentImages+5 {
+			t.Fatalf("stored = %d, want %d", stored, maxArchiveDocumentImages+5)
+		}
+		if len(warnings) != 0 {
+			t.Fatalf("warnings = %v, want none", warnings)
+		}
+	})
+
+	t.Run("parse budget overrun warns but keeps importing", func(t *testing.T) {
+		svc, fake, doc := build(maxArchiveDocumentImages + 1)
+		opts := archiveDocumentOptions{
+			maxImagesPerDocument: maxArchiveDocumentImages + 1,
+			parserBudgetWarnings: true,
+		}
+		_, stored, totalBytes, warnings, err := svc.storeArchiveImages(context.Background(), fake, 7, doc, opts)
+		if err != nil {
+			t.Fatalf("storeArchiveImages: %v", err)
+		}
+		if stored != maxArchiveDocumentImages+1 {
+			t.Fatalf("stored = %d, want %d", stored, maxArchiveDocumentImages+1)
+		}
+		if totalBytes <= 0 {
+			t.Fatalf("totalBytes = %d, want > 0", totalBytes)
+		}
+		found := false
+		for _, w := range warnings {
+			if strings.Contains(w, "解析器单文档预算") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("warnings = %v, want a parse-budget warning", warnings)
+		}
+	})
 }

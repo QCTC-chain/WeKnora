@@ -85,8 +85,7 @@ type Manifest struct {
 // read here, so the archive's byte budgets apply; structural limit violations
 // (too many documents, budget exhausted) abort the whole import, which the
 // handler turns into a 400 before anything is persisted.
-func BuildManifest(a *Archive) (*Manifest, error) {
-	limits := a.limits
+func BuildManifest(a ArchiveSource) (*Manifest, error) {
 	manifest := &Manifest{Skipped: a.Skipped()}
 
 	var docNames []string
@@ -112,8 +111,8 @@ func BuildManifest(a *Archive) (*Manifest, error) {
 	if len(docNames)+len(attachmentNames) == 0 {
 		return manifest, nil
 	}
-	if len(docNames)+len(attachmentNames) > limits.MaxDocuments {
-		return nil, fmt.Errorf("%w（%d > %d）", ErrTooManyDocs, len(docNames)+len(attachmentNames), limits.MaxDocuments)
+	if len(docNames)+len(attachmentNames) > a.documentLimit() {
+		return nil, fmt.Errorf("%w（%d > %d）", ErrTooManyDocs, len(docNames)+len(attachmentNames), a.documentLimit())
 	}
 
 	// Deterministic order: archive order is central-directory order, which
@@ -150,7 +149,7 @@ func BuildManifest(a *Archive) (*Manifest, error) {
 // spelling, relative to the document's directory (or archive root), names an
 // image entry. Unmatched references are recorded, never fatal: the document
 // keeps its original path and the import reports a warning.
-func buildDocument(a *Archive, name string, content []byte) *Document {
+func buildDocument(a ArchiveSource, name string, content []byte) *Document {
 	baseDir := ""
 	if idx := strings.LastIndexByte(name, '/'); idx >= 0 {
 		baseDir = name[:idx]
@@ -182,7 +181,7 @@ func buildDocument(a *Archive, name string, content []byte) *Document {
 			continue
 		}
 		data, err := a.Read(entry)
-		if err != nil || len(data) > maxImageBytes {
+		if err != nil || int64(len(data)) > a.imageByteLimit() {
 			// Oversized or unreadable image: keep the original path and let
 			// the report explain, instead of failing the document.
 			if _, dup := seenMissing[ref.Ref]; !dup {
@@ -207,7 +206,7 @@ func buildDocument(a *Archive, name string, content []byte) *Document {
 // Candidate spellings (percent-decoded and raw, "./"-stripped, root-relative)
 // are tried first relative to the document's directory, then relative to the
 // archive root, mirroring how Markdown loaders resolve sibling assets.
-func resolveReference(a *Archive, baseDir, rawRef string) (string, bool) {
+func resolveReference(a ArchiveSource, baseDir, rawRef string) (string, bool) {
 	spellings := referenceSpellings(rawRef)
 	for _, group := range spellings {
 		if baseDir != "" {
@@ -253,6 +252,20 @@ func referenceSpellings(rawRef string) []string {
 func isImageExtension(ext string) bool {
 	_, ok := imageExtensions[ext]
 	return ok
+}
+
+// IsDocumentCandidateName reports whether a file name would be classified by
+// BuildManifest as a Markdown document or a direct-import attachment —
+// neither an image nor an unsupported type. The local bulk import uses it
+// to decide whether a directory is an importable package, so the discovery
+// rule and the manifest scanner never disagree about what counts as a
+// document.
+func IsDocumentCandidateName(name string) bool {
+	ext := strings.ToLower(path.Ext(name))
+	if isImageExtension(ext) {
+		return false
+	}
+	return ext == ".md" || ext == ".markdown" || utils.IsSupportedImportExtension(ext)
 }
 
 func containsString(list []string, s string) bool {

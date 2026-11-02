@@ -66,6 +66,13 @@ services:
       # Optional: model catalog overlay (extra vendors / model overrides).
       # Copy config/models.json.example to config/models.json, then
       # - ./config/models.json:/app/config/models.json:ro
+      # Optional: 容器本地批量导入目录（服务端子命令）。挂载后执行
+      #   docker compose exec app ./WeKnora import-archives --dir /app/import --kb-id <知识库ID>
+      # 目录下所有 .zip 与结构与 zip 解压后一致的文件夹（含挂载目录本身）会绕过
+      # 前端上传限制，按放宽的有限内部预算（LOCAL_IMPORT_* 环境变量，见
+      # internal/utils/filesize.go）逐个导入；
+      # 成功的包移入 imported/，有失败的移入 failed/，重跑只处理残留的包。
+      - ./import:/app/import
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s

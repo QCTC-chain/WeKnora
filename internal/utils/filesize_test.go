@@ -38,3 +38,72 @@ func TestGetMaxSkillBundleSizeMB(t *testing.T) {
 		}
 	})
 }
+
+func TestGetLocalImportDefaults(t *testing.T) {
+	t.Run("finite defaults well above the upload caps", func(t *testing.T) {
+		t.Setenv("LOCAL_IMPORT_MAX_DOCUMENTS", "")
+		t.Setenv("LOCAL_IMPORT_MAX_ENTRIES", "")
+		t.Setenv("LOCAL_IMPORT_MAX_EXPANDED_SIZE_MB", "")
+		t.Setenv("LOCAL_IMPORT_MAX_SINGLE_ENTRY_SIZE_MB", "")
+		t.Setenv("LOCAL_IMPORT_MAX_IMAGE_SIZE_MB", "")
+		t.Setenv("LOCAL_IMPORT_MAX_IMAGES_PER_DOCUMENT", "")
+
+		if got := GetLocalImportMaxDocuments(); got != defaultLocalImportMaxDocuments {
+			t.Fatalf("documents = %d, want %d", got, defaultLocalImportMaxDocuments)
+		}
+		if got := GetLocalImportMaxEntries(); got != defaultLocalImportMaxEntries {
+			t.Fatalf("entries = %d, want %d", got, defaultLocalImportMaxEntries)
+		}
+		if got := GetLocalImportMaxExpandedSizeMB(); got != defaultLocalImportMaxExpandedSizeMB {
+			t.Fatalf("expanded = %d, want %d", got, defaultLocalImportMaxExpandedSizeMB)
+		}
+		if got := GetLocalImportMaxSingleEntrySizeMB(); got != defaultLocalImportMaxSingleEntryMB {
+			t.Fatalf("single entry = %d, want %d", got, defaultLocalImportMaxSingleEntryMB)
+		}
+		if got := GetLocalImportMaxImageSizeMB(); got != defaultLocalImportMaxImageSizeMB {
+			t.Fatalf("image = %d, want %d", got, defaultLocalImportMaxImageSizeMB)
+		}
+		if got := GetLocalImportMaxImagesPerDocument(); got != defaultLocalImportMaxImagesPerDoc {
+			t.Fatalf("images/doc = %d, want %d", got, defaultLocalImportMaxImagesPerDoc)
+		}
+	})
+
+	t.Run("honours explicit env overrides", func(t *testing.T) {
+		t.Setenv("LOCAL_IMPORT_MAX_DOCUMENTS", "10")
+		t.Setenv("LOCAL_IMPORT_MAX_ENTRIES", "20")
+		t.Setenv("LOCAL_IMPORT_MAX_EXPANDED_SIZE_MB", "30")
+		t.Setenv("LOCAL_IMPORT_MAX_SINGLE_ENTRY_SIZE_MB", "40")
+		t.Setenv("LOCAL_IMPORT_MAX_IMAGE_SIZE_MB", "5")
+		t.Setenv("LOCAL_IMPORT_MAX_IMAGES_PER_DOCUMENT", "50")
+
+		if got := GetLocalImportMaxDocuments(); got != 10 {
+			t.Fatalf("documents = %d, want 10", got)
+		}
+		if got := GetLocalImportMaxEntries(); got != 20 {
+			t.Fatalf("entries = %d, want 20", got)
+		}
+		if got := GetLocalImportMaxExpandedSizeMB(); got != 30 {
+			t.Fatalf("expanded = %d, want 30", got)
+		}
+		if got := GetLocalImportMaxSingleEntrySizeMB(); got != 40 {
+			t.Fatalf("single entry = %d, want 40", got)
+		}
+		if got := GetLocalImportMaxImageSizeMB(); got != 5 {
+			t.Fatalf("image = %d, want 5", got)
+		}
+		if got := GetLocalImportMaxImagesPerDocument(); got != 50 {
+			t.Fatalf("images/doc = %d, want 50", got)
+		}
+	})
+
+	t.Run("ignores invalid env values", func(t *testing.T) {
+		t.Setenv("LOCAL_IMPORT_MAX_DOCUMENTS", "not-a-number")
+		t.Setenv("LOCAL_IMPORT_MAX_IMAGE_SIZE_MB", "-3")
+		if got := GetLocalImportMaxDocuments(); got != defaultLocalImportMaxDocuments {
+			t.Fatalf("documents = %d, want default %d", got, defaultLocalImportMaxDocuments)
+		}
+		if got := GetLocalImportMaxImageSizeMB(); got != defaultLocalImportMaxImageSizeMB {
+			t.Fatalf("image = %d, want default %d", got, defaultLocalImportMaxImageSizeMB)
+		}
+	})
+}

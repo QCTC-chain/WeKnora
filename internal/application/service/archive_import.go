@@ -135,13 +135,25 @@ func (s *knowledgeService) importArchiveManifest(
 }
 
 // archiveDocumentOptions carries the shared upload form options that apply to
-// every document in the package.
+// every document in the package, plus the knobs that let the container-local
+// bulk import relax the stored-image cap and turn on parse-budget warnings.
 type archiveDocumentOptions struct {
 	metadata         map[string]any
 	enableMultimodel *bool
 	tagIDs           []string
 	channel          string
 	processOverrides *types.KnowledgeProcessOverrides
+
+	// maxImagesPerDocument overrides the per-document stored-image cap.
+	// 0 keeps the upload default (maxArchiveDocumentImages); the local bulk
+	// import raises it via LOCAL_IMPORT_MAX_IMAGES_PER_DOCUMENT.
+	maxImagesPerDocument int
+	// parserBudgetWarnings reports documents whose stored images exceed the
+	// parse pipeline's inline budgets. The parser budgets are deliberately
+	// NOT relaxed along with the import limits: excess images would be
+	// dropped at parse time, so the gap is surfaced in the report item and
+	// the log instead of silently degrading the knowledge content.
+	parserBudgetWarnings bool
 }
 
 // archiveEntry is the import-relevant projection of one archive file.
@@ -171,7 +183,7 @@ func (s *knowledgeService) importArchiveDocument(
 	tenantID uint64, tenantInfo *types.Tenant, doc *archive.Document, opts archiveDocumentOptions,
 ) types.ArchiveImportItem {
 	prepare := func(ctx context.Context, fileSvc interfaces.FileService) (*archivePrepared, error) {
-		rewritten, imagesStored, warnings, err := s.storeArchiveImages(ctx, fileSvc, tenantID, doc)
+		rewritten, imagesStored, _, warnings, err := s.storeArchiveImages(ctx, fileSvc, tenantID, doc, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -355,27 +367,34 @@ func (s *knowledgeService) importArchiveEntry(
 
 // storeArchiveImages persists every resolved image of one document and
 // returns the Markdown with all references rewritten to the stored URLs, the
-// number of images stored, and the warnings for references that matched
-// nothing (or exceeded the per-document cap). Unstored references keep their
-// original path in the rewritten Markdown.
+// number of images stored, their total byte size, and the warnings for
+// references that matched nothing (or exceeded the per-document cap).
+// Unstored references keep their original path in the rewritten Markdown.
 func (s *knowledgeService) storeArchiveImages(
 	ctx context.Context, fileSvc interfaces.FileService, tenantID uint64, doc *archive.Document,
-) (string, int, []string, error) {
+	opts archiveDocumentOptions,
+) (string, int, int64, []string, error) {
+	maxImages := opts.maxImagesPerDocument
+	if maxImages <= 0 {
+		maxImages = maxArchiveDocumentImages
+	}
 	refURLs := make(map[string]string, len(doc.Images))
 	warnings := make([]string, 0, len(doc.Missing))
 	stored := 0
+	var storedBytes int64
 	for i := range doc.Images {
 		img := &doc.Images[i]
-		if stored >= maxArchiveDocumentImages {
+		if stored >= maxImages {
 			warnings = append(warnings, fmt.Sprintf("图片数量超出每文档 %d 张上限，保留原路径：%s",
-				maxArchiveDocumentImages, img.Name))
+				maxImages, img.Name))
 			continue
 		}
 		ref, err := fileSvc.SaveBytes(ctx, img.Data, tenantID, img.Name, false)
 		if err != nil {
-			return "", 0, nil, fmt.Errorf("存储图片 %s 失败: %w", img.Name, err)
+			return "", 0, 0, nil, fmt.Errorf("存储图片 %s 失败: %w", img.Name, err)
 		}
 		stored++
+		storedBytes += int64(len(img.Data))
 		for _, rawRef := range img.Refs {
 			refURLs[rawRef] = ref
 		}
@@ -384,11 +403,34 @@ func (s *knowledgeService) storeArchiveImages(
 		warnings = append(warnings, fmt.Sprintf("压缩包中未找到图片 %s，保留原路径", archiveDisplayRef(missing)))
 	}
 
+	// Surface — never relax — the parse pipeline's own budgets: images beyond
+	// them are dropped at parse time, so say so while the import can still
+	// point at the culprit document.
+	if opts.parserBudgetWarnings {
+		if warn, over := parserBudgetWarning(stored, storedBytes); over {
+			warnings = append(warnings, warn)
+			logger.Warnf(ctx, "Local archive document %s exceeds parse inline budget: %s",
+				doc.Name, warn)
+		}
+	}
+
 	rewritten, _ := docparser.RewriteRelativeImageRefs(string(doc.Content), func(ref string) (string, bool) {
 		url, ok := refURLs[ref]
 		return url, ok && url != ""
 	})
-	return rewritten, stored, warnings, nil
+	return rewritten, stored, storedBytes, warnings, nil
+}
+
+// parserBudgetWarning compares one document's stored images against the
+// parse pipeline's inline budgets and returns the warning text plus whether
+// the budgets are exceeded.
+func parserBudgetWarning(images int, totalBytes int64) (string, bool) {
+	maxImages, maxBytes := docparser.InlineImageBudgets()
+	if images <= maxImages && totalBytes <= maxBytes {
+		return "", false
+	}
+	return fmt.Sprintf("存入图片 %d 张共 %.1fMiB，超出解析器单文档预算（%d 张/%d MiB），解析阶段超出部分会被忽略",
+		images, float64(totalBytes)/(1<<20), maxImages, maxBytes>>20), true
 }
 
 // archiveDisplayRef collapses percent escapes in a reference before it is

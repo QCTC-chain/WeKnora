@@ -458,6 +458,15 @@ const (
 	inlineImageOmitted         = "[image omitted]"
 )
 
+// InlineImageBudgets returns the parse pipeline's per-document inline image
+// budgets (count and total bytes). These caps are deliberately independent
+// from any import-side limit: archives may store more images than the
+// parser will inline, and importers use this accessor to WARN about the
+// gap instead of silently truncating at parse time.
+func InlineImageBudgets() (maxImages int, maxBytes int64) {
+	return maxInlineImagesPerDocument, maxInlineBytesPerDocument
+}
+
 type inlineQuotaKey struct{}
 
 type inlineQuota struct {

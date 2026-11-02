@@ -104,3 +104,68 @@ func GetMaxArchiveEntries() int {
 }
 
 const defaultMaxArchiveEntries = 5000
+
+// Container-local bulk zip import (the `import-archives` server subcommand).
+// The mounted-folder import has no HTTP upload frontier, so the upload caps
+// (ARCHIVE_MAX_SIZE_MB and friends) do not apply to it; these knobs replace
+// them. The defaults are deliberately finite — generous enough for
+// image-heavy multi-GiB packages, but extraction can never run away — and
+// every value is operator-tunable per deployment. Deploy-time env only,
+// read by archive.LocalImportLimits and the import service; the public
+// upload path keeps the stricter ARCHIVE_* limits.
+const (
+	defaultLocalImportMaxDocuments      = 2000
+	defaultLocalImportMaxEntries        = 20000
+	defaultLocalImportMaxExpandedSizeMB = 8192 // 8 GiB extracted per package
+	defaultLocalImportMaxSingleEntryMB  = 1024 // 1 GiB per entry
+	defaultLocalImportMaxImageSizeMB    = 64
+	defaultLocalImportMaxImagesPerDoc   = 5000
+)
+
+// GetLocalImportMaxDocuments returns how many Markdown/attachment documents
+// one local-import zip may yield (LOCAL_IMPORT_MAX_DOCUMENTS, default 2000).
+func GetLocalImportMaxDocuments() int {
+	return envInt("LOCAL_IMPORT_MAX_DOCUMENTS", defaultLocalImportMaxDocuments)
+}
+
+// GetLocalImportMaxEntries returns how many regular files one local-import
+// zip may contain (LOCAL_IMPORT_MAX_ENTRIES, default 20000).
+func GetLocalImportMaxEntries() int {
+	return envInt("LOCAL_IMPORT_MAX_ENTRIES", defaultLocalImportMaxEntries)
+}
+
+// GetLocalImportMaxExpandedSizeMB returns the extracted-bytes budget for one
+// local-import zip (LOCAL_IMPORT_MAX_EXPANDED_SIZE_MB, default 8192).
+func GetLocalImportMaxExpandedSizeMB() int64 {
+	return envSizeMB("LOCAL_IMPORT_MAX_EXPANDED_SIZE_MB", defaultLocalImportMaxExpandedSizeMB)
+}
+
+// GetLocalImportMaxSingleEntrySizeMB returns the per-entry extracted cap for
+// one local-import zip (LOCAL_IMPORT_MAX_SINGLE_ENTRY_SIZE_MB, default 1024).
+func GetLocalImportMaxSingleEntrySizeMB() int64 {
+	return envSizeMB("LOCAL_IMPORT_MAX_SINGLE_ENTRY_SIZE_MB", defaultLocalImportMaxSingleEntryMB)
+}
+
+// GetLocalImportMaxImageSizeMB returns the per-image cap for referenced
+// images in one local-import zip (LOCAL_IMPORT_MAX_IMAGE_SIZE_MB, default 64).
+func GetLocalImportMaxImageSizeMB() int64 {
+	return envSizeMB("LOCAL_IMPORT_MAX_IMAGE_SIZE_MB", defaultLocalImportMaxImageSizeMB)
+}
+
+// GetLocalImportMaxImagesPerDocument returns how many images one document of
+// a local-import zip may inline (LOCAL_IMPORT_MAX_IMAGES_PER_DOCUMENT,
+// default 5000). Note this stays independent of the parse pipeline's own
+// per-document inline budget: excess images are stored but reported, not
+// silently relaxed downstream.
+func GetLocalImportMaxImagesPerDocument() int {
+	return envInt("LOCAL_IMPORT_MAX_IMAGES_PER_DOCUMENT", defaultLocalImportMaxImagesPerDoc)
+}
+
+func envInt(key string, fallback int) int {
+	if valueStr := os.Getenv(key); valueStr != "" {
+		if value, err := strconv.Atoi(valueStr); err == nil && value > 0 {
+			return value
+		}
+	}
+	return fallback
+}
