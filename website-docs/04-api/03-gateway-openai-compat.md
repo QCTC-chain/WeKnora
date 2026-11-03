@@ -16,6 +16,7 @@ GATEWAY_ENABLED=true
 | --- | --- | --- |
 | `GATEWAY_ENABLED` | `false` | 总开关,关闭时 `/v1` 路由不注册 |
 | `GATEWAY_REQUEST_TIMEOUT` | `600s` | 单次补全内部预算(Go duration 或纯秒数) |
+| `GATEWAY_TURN_WAIT_TIMEOUT` | `30s` | 会话轮排队等待上限:目标会话已有进行中的轮时,新请求先排队等它结束,超过该上限才回 409 `session_busy`;显式 `0`(仅 YAML `turn_wait_timeout`)恢复旧的立即 409 行为 |
 | `GATEWAY_HEARTBEAT_INTERVAL` | `15s` | 首个内容输出前 keep-alive 注释行间隔 |
 | `GATEWAY_MAX_CONCURRENCY_PER_KEY` | `3` | 每个 API key 同时进行的补全数,超限立即 429;`0` 表示不限制(按副本计) |
 | `GATEWAY_SESSION_RETENTION` | `72h` | 网关临时会话(审计用)保留时长,超期由后台任务回收 |
@@ -176,7 +177,7 @@ Prometheus 文本格式 exposition(与网关共用 Bearer / `X-API-Key` 鉴权),
 | 401 | `invalid_api_key` | 缺少或无效 API key |
 | 403 | `insufficient_capability` | key 无 `chat` 能力位 |
 | 404 | `model_not_found` | model 不存在、未发布、跨空间或**未授予该 key**(`agent_grants` 白名单) |
-| 409 | `session_busy` / `request_in_progress` / `idempotency_key_mismatch` | 会话已有进行中的轮 / 同 key 幂等键正在执行 / 幂等键复用到不同请求体 |
+| 409 | `session_busy` / `request_in_progress` / `idempotency_key_mismatch` | 会话已有进行中的轮(先按 `GATEWAY_TURN_WAIT_TIMEOUT` 排队,超时才回此错;客户端也可换 `user` 字段或带 `X-WeKnora-Session-ID: new` 绕开同会话串行)/ 同 key 幂等键正在执行 / 幂等键复用到不同请求体 |
 | 429 | `concurrency_limit` | 该 key 并发数超过 `GATEWAY_MAX_CONCURRENCY_PER_KEY` |
 | 429 | `budget_exceeded` | 命中 key 或工作空间的每日 token/请求配额(消息内含 UTC 重置时间提示) |
 | 400 | (参数级) | 工具桥:`tools[]` 定义非法(非 function、名称为空/重复、`parameters` 非 JSON 对象、超过 32 个);工具结果缺失对应 `tool_call_id`、单条超 32000 字符,或 `wc1_` 令牌非法/过期 |

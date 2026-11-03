@@ -80,3 +80,38 @@ func TestGatewayRequestTimeoutOverride(t *testing.T) {
 		t.Fatalf("nil-section timeout = %v, want 600s", got)
 	}
 }
+
+// TestGatewayTurnWaitTimeoutOverride covers GATEWAY_TURN_WAIT_TIMEOUT: Go
+// durations, bare seconds, and garbage falling back to the default. The
+// fail-fast (0) and default (unset) cases are pinned via EffectiveTurnWaitTimeout.
+func TestGatewayTurnWaitTimeoutOverride(t *testing.T) {
+	cases := []struct {
+		env  string
+		want time.Duration
+	}{
+		{"45s", 45 * time.Second},
+		{"2m", 2 * time.Minute},
+		{"90", 90 * time.Second},
+		{"", 30 * time.Second},
+		{"garbage", 30 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run("env="+tc.env, func(t *testing.T) {
+			t.Setenv("GATEWAY_TURN_WAIT_TIMEOUT", tc.env)
+			cfg := &Config{Gateway: &GatewayConfig{}}
+			applyGatewayEnvOverrides(cfg)
+			if got := cfg.Gateway.EffectiveTurnWaitTimeout(); got != tc.want {
+				t.Fatalf("turn wait timeout = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// Nil section falls back to the default.
+	if got := (*GatewayConfig)(nil).EffectiveTurnWaitTimeout(); got != 30*time.Second {
+		t.Fatalf("nil-section turn wait = %v, want 30s", got)
+	}
+	// Explicit zero (YAML only; env accepts positives only) = fail-fast.
+	zero := time.Duration(0)
+	if got := (&GatewayConfig{TurnWaitTimeout: &zero}).EffectiveTurnWaitTimeout(); got != 0 {
+		t.Fatalf("explicit zero turn wait = %v, want 0", got)
+	}
+}

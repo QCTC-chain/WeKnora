@@ -45,26 +45,75 @@ const gatewayThreadActiveWindow = 72 * time.Hour
 // handling): concurrent sends on one continued session answer 409
 // session_busy instead of interleaving history. In-process, matching the M1
 // per-key semaphore decision — the deployment unit is one gateway process.
+//
+// Since the turn-wait queue (gateway.turn_wait_timeout) acquire blocks for a
+// bounded time instead of failing instantly: a strictly serial client whose
+// next request lands in the end-of-turn tail (final SSE frame is out, the
+// handler is still finalizing the assistant row and writing the audit entry
+// before its deferred release runs) waits it out instead of erroring. When
+// the wait budget expires the caller still answers the documented 409 +
+// Retry-After.
 type sessionTurnLocks struct {
 	mu   sync.Mutex
-	busy map[string]struct{}
+	busy map[string]*turnLockSlot
+}
+
+// turnLockSlot is one held session turn; released is closed on release so
+// waiters wake and retry the take.
+type turnLockSlot struct {
+	released chan struct{}
 }
 
 func newSessionTurnLocks() *sessionTurnLocks {
-	return &sessionTurnLocks{busy: make(map[string]struct{})}
+	return &sessionTurnLocks{busy: make(map[string]*turnLockSlot)}
 }
 
-func (l *sessionTurnLocks) tryAcquire(sessionID string) bool {
+// acquire takes the session turn, waiting up to timeout for the live turn
+// to finish (timeout <= 0 fails immediately, the legacy tryAcquire). ctx
+// cancellation aborts the wait: a client that hung up while queueing must
+// not keep a slot waiter budget alive. Returns false when the turn stayed
+// busy past the budget (or ctx ended first).
+func (l *sessionTurnLocks) acquire(ctx context.Context, sessionID string, timeout time.Duration) bool {
 	if sessionID == "" {
 		return true
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if _, held := l.busy[sessionID]; held {
-		return false
+	deadline := time.Now().Add(timeout)
+	for {
+		l.mu.Lock()
+		slot, held := l.busy[sessionID]
+		if !held {
+			l.busy[sessionID] = &turnLockSlot{released: make(chan struct{})}
+			l.mu.Unlock()
+			return true
+		}
+		released := slot.released
+		l.mu.Unlock()
+
+		if timeout <= 0 {
+			return false
+		}
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			return false
+		}
+		timer := time.NewTimer(remain)
+		select {
+		case <-released:
+			// The live turn finished; loop and race for the slot again —
+			// another waiter may have taken it first.
+			timer.Stop()
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+			return false
+		}
 	}
-	l.busy[sessionID] = struct{}{}
-	return true
+}
+
+// tryAcquire is acquire with no queuing (legacy fail-fast behavior).
+func (l *sessionTurnLocks) tryAcquire(sessionID string) bool {
+	return l.acquire(context.Background(), sessionID, 0)
 }
 
 func (l *sessionTurnLocks) release(sessionID string) {
@@ -73,7 +122,10 @@ func (l *sessionTurnLocks) release(sessionID string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.busy, sessionID)
+	if slot, held := l.busy[sessionID]; held {
+		delete(l.busy, sessionID)
+		close(slot.released)
+	}
 }
 
 // resolvedThread is the session a turn runs in plus whether it continues an

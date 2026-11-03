@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -170,6 +171,12 @@ func TestGatewayContinuationExplicitHeader(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }
 
+// gatewayTestConfig returns a gateway section for handler tests; wait is the
+// session-turn queue budget (0 = legacy fail-fast 409).
+func gatewayTestConfig(wait time.Duration) *config.GatewayConfig {
+	return &config.GatewayConfig{TurnWaitTimeout: &wait}
+}
+
 func TestGatewayContinuationSessionBusy409(t *testing.T) {
 	sessions := &fakeGatewaySessions{script: answerScript}
 	handler := NewGatewayHandler(
@@ -177,6 +184,9 @@ func TestGatewayContinuationSessionBusy409(t *testing.T) {
 			gatewayAgent("agt-1", "Doc QA", types.GatewayScopeTenant, "u1"),
 		}},
 		sessions, &fakeGatewayMessages{}, nil, nil, nil, nil, nil, nil)
+	// Zero turn-wait keeps the legacy fail-fast 409 in this test; the
+	// queuing behavior has its own test below.
+	handler.gateway = gatewayTestConfig(0)
 	sessions.mu.Lock()
 	sessions.thread = threadSession("sess-live", "user-1", "agt-1", time.Now())
 	sessions.mu.Unlock()
@@ -208,6 +218,78 @@ func TestGatewayContinuationSessionBusy409(t *testing.T) {
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"Doc QA","messages":[{"role":"user","content":"hi"}]}`)))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func TestGatewayContinuationSessionBusyWaitsForLiveTurn(t *testing.T) {
+	sessions := &fakeGatewaySessions{script: answerScript}
+	handler := NewGatewayHandler(
+		&fakeAgentService{agents: []*types.CustomAgent{
+			gatewayAgent("agt-1", "Doc QA", types.GatewayScopeTenant, "u1"),
+		}},
+		sessions, &fakeGatewayMessages{}, nil, nil, nil, nil, nil, nil)
+	// A short queue budget: the request must succeed once the live turn
+	// releases instead of answering 409 at the turn boundary.
+	handler.gateway = gatewayTestConfig(5 * time.Second)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		ctx := context.WithValue(c.Request.Context(), types.UserIDContextKey, "user-1")
+		ctx = context.WithValue(ctx, types.TenantIDContextKey, uint64(42))
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}, handler.ChatCompletions)
+
+	require.True(t, handler.turnLocks.tryAcquire("sess-live"), "test pre-holds the session turn")
+
+	type served struct {
+		rec *httptest.ResponseRecorder
+	}
+	done := make(chan served, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"Doc QA","messages":[{"role":"user","content":"hi"}]}`)))
+		done <- served{rec}
+	}()
+
+	// Give the request time to reach the queue, then release like the
+	// previous turn's handler would at return.
+	time.Sleep(100 * time.Millisecond)
+	handler.turnLocks.release("sess-live")
+
+	select {
+	case out := <-done:
+		require.Equal(t, http.StatusOK, out.rec.Code, out.rec.Body.String())
+	case <-time.After(10 * time.Second):
+		t.Fatal("queued request never completed after the live turn released")
+	}
+}
+
+func TestSessionTurnLocksBoundedWait(t *testing.T) {
+	locks := newSessionTurnLocks()
+	require.True(t, locks.tryAcquire("s"))
+	require.False(t, locks.tryAcquire("s"), "held session refuses a fail-fast take")
+
+	// Bounded wait times out while the holder stays put.
+	ctx := context.Background()
+	require.False(t, locks.acquire(ctx, "s", 30*time.Millisecond))
+
+	// Cancellation aborts the wait before the budget elapses.
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	require.False(t, locks.acquire(cancelCtx, "s", 30*time.Second))
+
+	// Release lets the next acquire (any mode) win.
+	locks.release("s")
+	require.True(t, locks.acquire(ctx, "s", time.Second))
+	// Double release is a no-op and must not panic on the closed channel.
+	locks.release("s")
+	locks.release("s")
+	locks.release("s")
 }
 
 func TestGatewayContinuationAnonymousStaysStateless(t *testing.T) {

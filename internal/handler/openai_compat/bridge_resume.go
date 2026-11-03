@@ -166,7 +166,10 @@ func (h *GatewayHandler) resumeToolBridge(
 		return
 	}
 	defer release()
-	if !h.turnLocks.tryAcquire(session.ID) {
+	// Same bounded turn-wait as the ordinary path: the tool-results
+	// follow-up races the suspended run's tail just like a serial client
+	// races the previous turn's finalization.
+	if !h.turnLocks.acquire(ctx, session.ID, h.gateway.EffectiveTurnWaitTimeout()) {
 		c.Header("Retry-After", "5")
 		writeProtoError(c, proto, http.StatusConflict, "session_busy",
 			"A turn is already running in session "+session.ID+"; retry after it finishes")

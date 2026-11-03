@@ -194,12 +194,24 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 	var session *types.Session
 	if thread.session != nil {
 		session = thread.session
-		// Design §3 conflict handling: one live run per session; concurrent
-		// sends answer 409 immediately.
-		if !h.turnLocks.tryAcquire(session.ID) {
-			c.Header("Retry-After", "5")
-			writeProtoError(c, proto, http.StatusConflict, "session_busy",
-				"A turn is already running in session "+session.ID+"; retry after it finishes, change the user field, or send "+SessionIDHeader+": new")
+		// Design §3 conflict handling: one live run per session. Instead of
+		// failing instantly, queue behind the live turn for a bounded wait
+		// (gateway.turn_wait_timeout, default 30s): strictly serial clients
+		// pay only the end-of-turn tail instead of a spurious 409, while a
+		// genuinely long turn still answers 409 + Retry-After once the wait
+		// elapses. The waiter holds its per-key concurrency slot while
+		// queueing, so queueing counts against max_concurrency_per_key.
+		wait := h.gateway.EffectiveTurnWaitTimeout()
+		if !h.turnLocks.acquire(ctx, session.ID, wait) {
+			if ctx.Err() == nil {
+				logger.Warnf(ctx, "[gateway] session turn wait timed out: session=%s waited=%s",
+					session.ID, wait)
+				c.Header("Retry-After", "5")
+				writeProtoError(c, proto, http.StatusConflict, "session_busy",
+					"A turn is already running in session "+session.ID+"; retry after it finishes, change the user field, or send "+SessionIDHeader+": new")
+			}
+			// ctx cancelled: the client hung up while queueing; nothing to
+			// answer. The idempotency claim unwinds via its own defer.
 			return
 		}
 		defer h.turnLocks.release(session.ID)
@@ -612,8 +624,11 @@ func (h *GatewayHandler) runGatewayTurn(
 }
 
 // askCompleteWait is the grace window between the answer completing and the
-// completion event (usage/references) arriving — same idea as the MCP caller.
-const askCompleteWait = 30 * time.Second
+// completion event (usage/references) arriving — same idea as the MCP caller
+// (mcpserver askCompleteWaitTimeout): the complete event normally follows the
+// final answer within milliseconds, so the window only guards against a lost
+// or late event; shorter bounds the dead air and the session-turn lock tail.
+const askCompleteWait = 15 * time.Second
 
 // createTurnMessages persists the user + assistant rows of one gateway turn.
 // Both completions paths (aggregate and stream) share this pair.

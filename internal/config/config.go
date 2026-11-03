@@ -79,6 +79,15 @@ type GatewayConfig struct {
 	// RequestTimeout bounds one chat/completions turn (docs §9). Default
 	// 600s. Env override: GATEWAY_REQUEST_TIMEOUT (Go duration or seconds).
 	RequestTimeout time.Duration `yaml:"request_timeout" json:"request_timeout"`
+	// TurnWaitTimeout bounds how long a request whose session already has a
+	// live turn waits in line for that turn to finish before answering 409
+	// session_busy. It absorbs the end-of-turn tail (assistant-message
+	// finalization + audit write after the client already saw the final
+	// frame), so strictly serial clients no longer race into 409 at turn
+	// boundaries; a genuinely long running turn still answers 409 once the
+	// wait elapses. Default 30s; explicit 0 restores the legacy fail-fast.
+	// Env override: GATEWAY_TURN_WAIT_TIMEOUT (Go duration or seconds).
+	TurnWaitTimeout *time.Duration `yaml:"turn_wait_timeout" json:"turn_wait_timeout"`
 	// HeartbeatInterval is the SSE keep-alive cadence before the first
 	// content chunk (docs §9). Default 15s. Env override:
 	// GATEWAY_HEARTBEAT_INTERVAL (Go duration or seconds).
@@ -128,7 +137,12 @@ type GatewayConfig struct {
 
 // Gateway defaults (docs design/agent-model-gateway-m1.md §9/§10).
 const (
-	DefaultGatewayRequestTimeout    = 600 * time.Second
+	DefaultGatewayRequestTimeout = 600 * time.Second
+	// DefaultGatewayTurnWaitTimeout bounds the session-turn queue (see
+	// GatewayConfig.TurnWaitTimeout): long enough to bridge the post-answer
+	// finalization tail and short turns, short enough that a genuinely long
+	// live turn still fails fast with 409 + Retry-After.
+	DefaultGatewayTurnWaitTimeout   = 30 * time.Second
 	DefaultGatewayHeartbeatInterval = 15 * time.Second
 	DefaultGatewayMaxConcurrency    = 3
 	DefaultGatewaySessionRetention  = 72 * time.Hour
@@ -162,6 +176,19 @@ func (g *GatewayConfig) EffectiveRequestTimeout() time.Duration {
 		return DefaultGatewayRequestTimeout
 	}
 	return g.RequestTimeout
+}
+
+// EffectiveTurnWaitTimeout returns the session-turn queue bound, nil-safe.
+// Unset uses the design default; an explicit value of 0 (or negative,
+// normalized to 0) restores the legacy fail-fast 409 with no queuing.
+func (g *GatewayConfig) EffectiveTurnWaitTimeout() time.Duration {
+	if g == nil || g.TurnWaitTimeout == nil {
+		return DefaultGatewayTurnWaitTimeout
+	}
+	if *g.TurnWaitTimeout < 0 {
+		return 0
+	}
+	return *g.TurnWaitTimeout
 }
 
 // EffectiveHeartbeatInterval returns the SSE keep-alive cadence, nil-safe,
@@ -1063,6 +1090,9 @@ func applyGatewayEnvOverrides(cfg *Config) {
 		gateway.Enabled = gatewayTruthy(value)
 	}
 	applyGatewayTimeoutOverride(gateway)
+	applyGatewayDurationOverride("GATEWAY_TURN_WAIT_TIMEOUT", func(d time.Duration) {
+		gateway.TurnWaitTimeout = &d
+	})
 	applyGatewayDurationOverride("GATEWAY_HEARTBEAT_INTERVAL", func(d time.Duration) {
 		gateway.HeartbeatInterval = d
 	})
