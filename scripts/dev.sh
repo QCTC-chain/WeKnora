@@ -482,7 +482,11 @@ start_app() {
         export DB_HOST=127.0.0.1
         export DOCREADER_ADDR=127.0.0.1:50051
         export MINIO_ENDPOINT=127.0.0.1:9000
-        export REDIS_ADDR=127.0.0.1:6379
+        # .env 默认 REDIS_ADDR 是容器服务名 redis:6379（docker 内部访问），本地直跑需映射到回环地址；
+        # 若 .env.local 已显式配置 REDIS_ADDR（如自定义端口 16379），则保留用户配置不覆盖。
+        case "$REDIS_ADDR" in
+            redis:*|"") export REDIS_ADDR="127.0.0.1:${REDIS_PORT:-6379}" ;;
+        esac
         export MILVUS_ADDRESS=127.0.0.1:19530
         export NEO4J_URI=bolt://127.0.0.1:7687
         export QDRANT_HOST=127.0.0.1
