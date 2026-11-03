@@ -36,7 +36,9 @@ type SessionService interface {
 	UpdateSessionLastRequestState(ctx context.Context, sessionID string, state *types.SessionLastRequestState) error
 	// FindGatewayThreadSession resolves the M2-3 gateway continuation anchor:
 	// the most recently active gateway session for (tenant, owner, agent).
-	// Returns (nil, nil) when no live thread exists.
+	// Sessions carrying SessionLastRequestState.Stateless (store=false
+	// audit-only turns) are always excluded. Returns (nil, nil) when no live
+	// thread exists.
 	FindGatewayThreadSession(
 		ctx context.Context, tenantID uint64, ownerUserID, agentID string, activeAfter time.Time,
 	) (*types.Session, error)
@@ -155,8 +157,9 @@ type SessionRepository interface {
 	ListExpiredGatewaySessions(ctx context.Context, olderThan time.Time, limit int) ([]*types.Session, error)
 	// FindGatewayThreadSession returns the most recently active gateway-kind
 	// session for (tenant, owner user, agent) whose updated_at is not older
-	// than activeAfter — the M2-3 continuation anchor. Returns (nil, nil)
-	// when no live thread exists.
+	// than activeAfter — the M2-3 continuation anchor. Sessions marked
+	// Stateless (store=false audit-only turns) never anchor a thread.
+	// Returns (nil, nil) when no live thread exists.
 	FindGatewayThreadSession(
 		ctx context.Context, tenantID uint64, ownerUserID, agentID string, activeAfter time.Time,
 	) (*types.Session, error)

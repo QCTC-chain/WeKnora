@@ -8,9 +8,12 @@ package openai_compat
 // Identity precedence (design §3):
 //  1. explicit `X-WeKnora-Session-ID` request header (or `new` to force a
 //     fresh session);
-//  2. the OpenAI `user` field + `model` pair: the gateway looks up the
-//     tenant's most recently active gateway session for
-//     (owner user, agent) and continues it.
+//  2. store=false opts the turn out of continuation entirely: it always
+//     runs in a fresh audit-only session that can never anchor a thread;
+//  3. the (owner user | API key, agent) derived thread: the gateway looks
+//     up the tenant's most recently active gateway session for that pair
+//     and continues it. The OpenAI `user` field is audit metadata only and
+//     does not scope threads.
 //
 // The first response echoes `X-WeKnora-Session-Id` (M1) so clients can pin
 // the thread; concurrent sends against one session answer 409 session_busy.
@@ -140,8 +143,13 @@ type resolvedThread struct {
 // creates a session; callers fall back to createGatewaySession when
 // thread.session == nil. Explicit-header misses answer 404 (debugging
 // surface, no silent fork); derived-key misses fall back to a new session.
+// stateless (request store=false) skips the derived thread entirely: the
+// turn answers in a fresh session so concurrent housekeeping calls (session
+// titles fired alongside the main question) neither queue behind the live
+// conversation turn nor hijack the thread anchor. An explicit session
+// header still wins over store=false (the caller pinned the thread).
 func (h *GatewayHandler) resolveGatewayThread(
-	ctx context.Context, c *gin.Context, tenantID uint64, agent *types.CustomAgent,
+	ctx context.Context, c *gin.Context, tenantID uint64, agent *types.CustomAgent, stateless bool,
 ) (*resolvedThread, bool) {
 	owner := types.SessionOwnerIDFromContext(ctx)
 
@@ -157,6 +165,14 @@ func (h *GatewayHandler) resolveGatewayThread(
 			return nil, false // 404 session_not_found
 		}
 		return &resolvedThread{session: session, continued: true}, true
+	}
+
+	// store=false: skip the derived lookup; the caller creates a fresh
+	// session. The repository also excludes such sessions from future
+	// lookups (SessionLastRequestState.Stateless), so an audit-only turn
+	// can never become the thread anchor even though it is newer.
+	if stateless {
+		return &resolvedThread{}, true
 	}
 
 	// Derived identity: (owner user | key, agent). Without an owner principal

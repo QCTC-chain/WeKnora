@@ -151,6 +151,15 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 		return
 	}
 
+	// store=false (OpenAI semantics, docs design §3): the caller opts the
+	// turn out of conversation state — no derived-thread continuation, fresh
+	// audit-only session that can never become a thread anchor. This keeps
+	// background housekeeping calls (e.g. the session-title generation agent
+	// clients fire alongside the main question) off the conversation
+	// session: no 409 session_busy contention, no thread hijack, no history
+	// pollution.
+	stateless := req.Store != nil && !*req.Store
+
 	turn, err := renderMessages(req.Messages, agent.Config.ImageUploadEnabled)
 	if err != nil {
 		writeProtoParam(c, proto, http.StatusBadRequest, "messages", err.Error())
@@ -169,9 +178,10 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 	}
 	defer release()
 
-	// M2-3 session continuation: explicit header wins, then the
-	// (owner|key, agent) derived thread; miss falls back to a fresh session.
-	thread, ok := h.resolveGatewayThread(ctx, c, tenantID, agent)
+	// M2-3 session continuation: explicit header wins, then store=false
+	// opts out of threading entirely, then the (owner|key, agent) derived
+	// thread; miss falls back to a fresh session.
+	thread, ok := h.resolveGatewayThread(ctx, c, tenantID, agent, stateless)
 	if !ok {
 		writeProtoError(c, proto, http.StatusNotFound, "session_not_found",
 			"The session referenced by "+SessionIDHeader+" does not exist in this workspace, is not a gateway session, or belongs to another agent")
@@ -208,7 +218,7 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 					session.ID, wait)
 				c.Header("Retry-After", "5")
 				writeProtoError(c, proto, http.StatusConflict, "session_busy",
-					"A turn is already running in session "+session.ID+"; retry after it finishes, change the user field, or send "+SessionIDHeader+": new")
+					"A turn is already running in session "+session.ID+"; retry after it finishes, or send "+SessionIDHeader+": new")
 			}
 			// ctx cancelled: the client hung up while queueing; nothing to
 			// answer. The idempotency claim unwinds via its own defer.
@@ -216,7 +226,7 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 		}
 		defer h.turnLocks.release(session.ID)
 	} else {
-		created, err := h.createGatewaySession(ctx, tenantID, agent, req.Model)
+		created, err := h.createGatewaySession(ctx, tenantID, agent, req.Model, stateless)
 		if err != nil {
 			logger.ErrorWithFields(ctx, err, map[string]interface{}{"tenant_id": tenantID})
 			h.releaseIdempotency(ctx, claim)
@@ -247,6 +257,7 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 		IgnoredParams: ignoredSamplingParams,
 		AgentID:       agent.ID,
 		SessionID:     session.ID,
+		Stateless:     stateless,
 	}
 	if !bridgeEnabled && len(req.Tools) > 0 {
 		meta.ClientToolsIgnored = len(req.Tools)
@@ -738,9 +749,11 @@ func (h *GatewayHandler) launchAgentQA(
 
 // createGatewaySession creates the one-shot audit session. Kind="gateway"
 // keeps it out of ordinary chat listings (repository filters kind=”) and
-// gives the retention task a marker to delete by (G4).
+// gives the retention task a marker to delete by (G4). stateless sessions
+// (store=false turns) carry SessionLastRequestState.Stateless so the thread
+// lookup never anchors on them.
 func (h *GatewayHandler) createGatewaySession(
-	ctx context.Context, tenantID uint64, agent *types.CustomAgent, model string,
+	ctx context.Context, tenantID uint64, agent *types.CustomAgent, model string, stateless bool,
 ) (*types.Session, error) {
 	title := "gateway:" + model
 	if runes := []rune(title); len(runes) > gatewaySessionTitleMaxRunes {
@@ -753,7 +766,9 @@ func (h *GatewayHandler) createGatewaySession(
 		Description: "OpenAI-compatible gateway turn; model=" + model,
 		// M2-3: pins the agent so thread lookups (continuation) and explicit
 		// header continues can verify the session belongs to this agent.
-		LastRequestState: &types.SessionLastRequestState{AgentID: agent.ID, AgentEnabled: true},
+		// Stateless marks store=false sessions audit-only: excluded from
+		// thread lookups by FindGatewayThreadSession.
+		LastRequestState: &types.SessionLastRequestState{AgentID: agent.ID, AgentEnabled: true, Stateless: stateless},
 	})
 	if err != nil {
 		return nil, err

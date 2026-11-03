@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"testing"
+	"time"
 
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -52,6 +53,50 @@ func sessionIDsForTest(sessions []*types.Session) []string {
 		ids = append(ids, session.ID)
 	}
 	return ids
+}
+
+// TestSessionRepositoryFindGatewayThreadSkipsStateless locks in the
+// store=false rule: audit-only stateless sessions (SessionLastRequestState
+// .Stateless, set by the gateway for store=false turns) never anchor the
+// M2-3 continuation thread — not even when they are the most recently
+// active session for the (owner, agent) pair.
+func TestSessionRepositoryFindGatewayThreadSkipsStateless(t *testing.T) {
+	repo, db := newSessionRepositoryForTest(t)
+	ctx := context.Background()
+	agentID := "agt-1"
+	now := time.Now()
+
+	stateful := &types.Session{
+		TenantID: 1, Kind: types.SessionKindGateway, UserID: "owner-1",
+		Title:     "gateway:agent",
+		UpdatedAt: now.Add(-time.Minute),
+		LastRequestState: &types.SessionLastRequestState{
+			AgentID: agentID, AgentEnabled: true,
+		},
+	}
+	require.NoError(t, db.Create(stateful).Error)
+	stateless := &types.Session{
+		TenantID: 1, Kind: types.SessionKindGateway, UserID: "owner-1",
+		Title:     "gateway:agent",
+		UpdatedAt: now,
+		LastRequestState: &types.SessionLastRequestState{
+			AgentID: agentID, AgentEnabled: true, Stateless: true,
+		},
+	}
+	require.NoError(t, db.Create(stateless).Error)
+
+	// The stateless session is the most recently active, but the anchor
+	// must resolve to the stateful thread.
+	found, err := repo.FindGatewayThreadSession(ctx, 1, "owner-1", agentID, now.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	require.Equal(t, stateful.ID, found.ID, "stateless sessions never hijack the thread anchor")
+
+	// Without any stateful session the lookup is empty, not the stateless one.
+	require.NoError(t, db.Delete(stateful).Error)
+	found, err = repo.FindGatewayThreadSession(ctx, 1, "owner-1", agentID, now.Add(-time.Hour))
+	require.NoError(t, err)
+	require.Nil(t, found)
 }
 
 func TestSessionRepositoryGetAndListHonorUserScope(t *testing.T) {

@@ -80,7 +80,9 @@ curl -s $BASE/v1/models -H "Authorization: Bearer $KEY"
 
 ### POST /v1/chat/completions
 
-**messages 折叠规则**:整个 `messages` 数组折叠为智能体的单轮输入——system 消息叠进调用方指令(每条截断 8000 字符),其余按对话历史注入(最近 40 条、32000 字符),最后一条 user 消息为本次问题。**没有跨请求会话续接**:每次调用创建独立的临时会话(审计保留 72h)。
+**messages 折叠规则**:整个 `messages` 数组折叠为智能体的单轮输入——system 消息叠进调用方指令(每条截断 8000 字符),其余按对话历史注入(最近 40 条、32000 字符),最后一条 user 消息为本次问题。
+
+**会话续接与 `store`**:同一 API key 对同一模型的调用默认续接同一个网关会话(续接轮只注入最后一条 user 消息,其余历史由服务端会话提供),首轮响应回显 `X-WeKnora-Session-ID` 供客户端锁定;请求头 `X-WeKnora-Session-ID`(值 `new` 强制新会话)显式指定线程。请求体 `store:false` 标记**状态无关轮**:本轮在独立的一次性审计会话中执行,不续接现有线程、也不会被后续派生续接命中、更不与其它轮争抢同会话串行锁——适合与正式提问**并发**发出的后台辅助调用(如会话标题生成),避免它们把真实提问挤出 30s 排队窗口(409 `session_busy`)。`store` 缺省/`true` 保持续接行为;显式会话头优先于 `store:false`。注意 OpenAI `user` 字段仅进审计日志,不参与会话线程派生。
 
 **非流式**:
 
@@ -177,7 +179,7 @@ Prometheus 文本格式 exposition(与网关共用 Bearer / `X-API-Key` 鉴权),
 | 401 | `invalid_api_key` | 缺少或无效 API key |
 | 403 | `insufficient_capability` | key 无 `chat` 能力位 |
 | 404 | `model_not_found` | model 不存在、未发布、跨空间或**未授予该 key**(`agent_grants` 白名单) |
-| 409 | `session_busy` / `request_in_progress` / `idempotency_key_mismatch` | 会话已有进行中的轮(先按 `GATEWAY_TURN_WAIT_TIMEOUT` 排队,超时才回此错;客户端也可换 `user` 字段或带 `X-WeKnora-Session-ID: new` 绕开同会话串行)/ 同 key 幂等键正在执行 / 幂等键复用到不同请求体 |
+| 409 | `session_busy` / `request_in_progress` / `idempotency_key_mismatch` | 会话已有进行中的轮(先按 `GATEWAY_TURN_WAIT_TIMEOUT` 排队,超时才回此错;客户端也可带 `X-WeKnora-Session-ID: new`,或对后台辅助请求用 `store:false` 状态无关轮绕开同会话串行)/ 同 key 幂等键正在执行 / 幂等键复用到不同请求体 |
 | 429 | `concurrency_limit` | 该 key 并发数超过 `GATEWAY_MAX_CONCURRENCY_PER_KEY` |
 | 429 | `budget_exceeded` | 命中 key 或工作空间的每日 token/请求配额(消息内含 UTC 重置时间提示) |
 | 400 | (参数级) | 工具桥:`tools[]` 定义非法(非 function、名称为空/重复、`parameters` 非 JSON 对象、超过 32 个);工具结果缺失对应 `tool_call_id`、单条超 32000 字符,或 `wc1_` 令牌非法/过期 |
@@ -190,7 +192,7 @@ Prometheus 文本格式 exposition(与网关共用 Bearer / `X-API-Key` 鉴权),
 - 每次进入智能体执行的补全(成功或失败、流式或非流式、OpenAI 或 Anthropic 壳)写一条 `gateway.completion` 审计日志,明细含 key 指纹(id+名称,**不含密钥原文**)、会话 ID、解析到的智能体、调用方原始 model 字符串、stream 标志、token 用量、耗时、HTTP 状态码与结束原因(`completed`/`error`/`timeout`/`disconnect`/`disconnect_run_completed`)。`GATEWAY_AUDIT_PAYLOAD=true` 时额外留存截断后的 query 与采样事件流水(见上方 /v1/metrics 一节的排障说明)。
 - 并发限制按 key 计数,**每个后端副本独立计数**;多副本部署时全局上限为副本数 × 每副本上限。
 - **用量计量(M2-2)**:每轮补全写一行 `gateway_usage`(租户/key/智能体/会话/模型/stream/token/耗时/结束原因),是配额判定的数据源;被 429 拒绝的请求不产生用量行,失败轮同样计量(结束原因 `error`)。计量写失败只告警不阻断已完成的轮。
-- 网关临时会话(`kind=gateway`)由后台任务按 `GATEWAY_SESSION_RETENTION` 回收(每小时一轮,单轮最多 200 条);被续接复用的会话每轮滑动保留窗口(`X-WeKnora-Session-ID: new` 或换 user 字段可强制新会话)。
+- 网关临时会话(`kind=gateway`)由后台任务按 `GATEWAY_SESSION_RETENTION` 回收(每小时一轮,单轮最多 200 条);被续接复用的会话每轮滑动保留窗口(`X-WeKnora-Session-ID: new` 头或请求体 `store:false` 可强制新会话;`store:false` 轮的一次性会话不会成为续接锚点)。
 
 ## API key 网关字段(M2-2)
 

@@ -354,10 +354,14 @@ func (c *SummaryConfig) Scan(value interface{}) error {
 }
 
 // SessionLastRequestState captures the user-facing input-bar state at the
-// time of the most recent QA request on a session. It is purely a UI memory
-// aid — none of the fields here drive backend behaviour. They are echoed back
+// time of the most recent QA request on a session. The UI fields are purely
+// a memory aid — none of them drive backend behaviour. They are echoed back
 // to the frontend by GetSession so the chat input can restore the same agent,
 // model, KB scope, etc. the user had selected last time.
+//
+// Stateless is the exception: the gateway sets it on store=false turns, and
+// FindGatewayThreadSession filters such sessions out of thread continuation
+// so an audit-only turn can never anchor (or hijack) a conversation thread.
 type SessionLastRequestState struct {
 	AgentID             string         `json:"agent_id,omitempty"`
 	AgentEnabled        bool           `json:"agent_enabled"`
@@ -371,6 +375,9 @@ type SessionLastRequestState struct {
 	MentionedItems      MentionedItems `json:"mentioned_items,omitempty"`
 	LocalBrowserEnabled bool           `json:"local_browser_enabled"`
 	WebSearchEnabled    bool           `json:"web_search_enabled"`
+	// Stateless marks a gateway session created for a store=false turn:
+	// audit-only, excluded from gateway thread continuation lookups.
+	Stateless bool `json:"stateless,omitempty"`
 }
 
 // Value implements driver.Valuer for SessionLastRequestState (JSONB).

@@ -43,7 +43,8 @@ M1 的发布只是一个布尔位。M2 升级为完整治理:
   1. 请求头 `X-WeKnora-Session-ID`(显式,排障与高级用户);
   2. OpenAI `user` 字段 + `model` 的组合派生稳定 key(`<tenant>:<user>:<agent>`),服务端查活跃 gateway 会话即续接。
 - **续接语义**:命中会话时,只把**最后一条 user 消息**作为本轮 query(不再折叠全量历史,WeKnora 会话历史由服务端提供);未命中则回落 M1 无状态渲染。首轮回显 `X-WeKnora-Session-Id` 供客户端锁定。
-- **冲突处理**:同会话并发请求先按 `gateway.turn_wait_timeout`(默认 30s,env `GATEWAY_TURN_WAIT_TIMEOUT`)在会话轮队列中有界等待——严格串行的客户端只需吸收上一轮结束时的落库/审计尾巴,不再在轮次边界撞 409;超过上限仍回 409 `session_busy`(会话级 live-run 互斥本就存在);客户端换 `user` 或显式新建(`X-WeKnora-Session-ID: new`)。
+- **冲突处理**:同会话并发请求先按 `gateway.turn_wait_timeout`(默认 30s,env `GATEWAY_TURN_WAIT_TIMEOUT`)在会话轮队列中有界等待——严格串行的客户端只需吸收上一轮结束时的落库/审计尾巴,不再在轮次边界撞 409;超过上限仍回 409 `session_busy`(会话级 live-run 互斥本就存在);客户端可显式新建(`X-WeKnora-Session-ID: new`)或用 `store:false` 状态无关轮绕开(见下)。
+- **状态无关轮(`store:false`)**:OpenAI `store:false` 标记本轮不进入任何会话状态——网关为它新建仅审计用的 gateway 会话,不做派生线程续接,并以 `agent_config.stateless` 标记使其永远不成为线程锚点(`FindGatewayThreadSession` 过滤,SQLite/Postgres 双方言)。与主提问并发发出的后台辅助请求(如 agent 客户端的会话标题生成)因此不再与对话轮争抢会话串行锁,也不会劫持线程锚点或污染会话历史;请求体 `store` 字段缺省/`true` 保持原有续接行为,显式 `X-WeKnora-Session-ID` 头仍优先于 `store:false`。注:OpenAI `user` 字段仅进审计日志,不参与会话线程派生(实现以 key 主体 + agent 定位线程)。
 - **生命周期**:续接会话同样纳入回收任务,但按"最后活跃 + retention"滑动过期。
 
 风险与对策:客户端 `user` 字段语义不可控(有的填随机值)→ 文档明确"同 user 同 agent 即同会话",并提供请求头覆盖。工作量:约 1 周。

@@ -173,6 +173,45 @@ func TestGatewayContinuationExplicitHeader(t *testing.T) {
 
 // gatewayTestConfig returns a gateway section for handler tests; wait is the
 // session-turn queue budget (0 = legacy fail-fast 409).
+func TestGatewayContinuationStoreFalseSkipsDerivedThread(t *testing.T) {
+	sessions := &fakeGatewaySessions{script: answerScript}
+	sessions.mu.Lock()
+	sessions.thread = threadSession("sess-live", "user-1", "agt-1", time.Now())
+	sessions.mu.Unlock()
+
+	// store=false with a live derived thread → fresh session: the turn must
+	// not queue behind (or hijack) the conversation thread.
+	rec := serveContinuation(t, sessions, "user-1", "",
+		`{"model":"Doc QA","store":false,"messages":[{"role":"user","content":"title me"}]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	sessions.mu.Lock()
+	qa := sessions.qaRequests[len(sessions.qaRequests)-1]
+	created := sessions.created
+	touched := append([]string(nil), sessions.touched...)
+	sessions.mu.Unlock()
+	require.Equal(t, "sess-1", qa.Session.ID, "store=false turns never join the derived thread")
+	require.NotNil(t, created.LastRequestState)
+	require.True(t, created.LastRequestState.Stateless,
+		"stateless sessions carry the audit marker excluded from thread lookups")
+	require.NotContains(t, touched, "sess-live", "stateless turns do not slide the thread window")
+	require.Contains(t, qa.Query, "title me", "fresh turns fold the whole history")
+
+	// An explicit session header still wins over store=false.
+	sessions.mu.Lock()
+	sessions.created = nil
+	sessions.touched = nil
+	sessions.mu.Unlock()
+	rec = serveContinuation(t, sessions, "user-1", "sess-live",
+		`{"model":"Doc QA","store":false,"messages":[{"role":"user","content":"pinned"}]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	sessions.mu.Lock()
+	qa = sessions.qaRequests[len(sessions.qaRequests)-1]
+	touched = append([]string(nil), sessions.touched...)
+	sessions.mu.Unlock()
+	require.Equal(t, "sess-live", qa.Session.ID, "explicit X-WeKnora-Session-ID overrides store=false")
+	require.Contains(t, touched, "sess-live", "explicit continues slide the retention window")
+}
+
 func gatewayTestConfig(wait time.Duration) *config.GatewayConfig {
 	return &config.GatewayConfig{TurnWaitTimeout: &wait}
 }
@@ -211,6 +250,8 @@ func TestGatewayContinuationSessionBusy409(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	require.Contains(t, rec.Body.String(), "session_busy")
+	require.NotContains(t, rec.Body.String(), "user field",
+		"the OpenAI user field does not scope threads; suggesting it misleads clients")
 
 	// Releasing unblocks the next turn.
 	handler.turnLocks.release("sess-live")

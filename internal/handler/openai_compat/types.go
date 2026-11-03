@@ -82,6 +82,15 @@ type ChatCompletionRequest struct {
 	// StreamOptions is accepted for wire compatibility; only include_usage
 	// matters and usage is always included.
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+	// Store mirrors the OpenAI store flag. false marks the request stateless:
+	// the turn runs in its own fresh audit-only gateway session, never joins
+	// the (owner | key, agent) derived continuation thread, and its session
+	// can never become a thread anchor. Background housekeeping calls (e.g.
+	// the session-title generation some agent clients fire alongside the main
+	// question) therefore neither queue behind the conversation turn nor
+	// hijack its thread. Absent or true keeps the default stateful
+	// continuation behavior (explicit X-WeKnora-Session-ID still wins).
+	Store *bool `json:"store,omitempty"`
 	// Tools declares the caller's client tools (M3-1): function tools are
 	// bridged into the run — the model's calls come back as
 	// finish_reason="tool_calls", and the next request carries tool results
@@ -228,6 +237,10 @@ type CompletionMeta struct {
 	// run is suspended until the caller returns tool results carrying the
 	// same call IDs.
 	BridgePending bool `json:"bridge_pending,omitempty"`
+	// Stateless marks a store=false turn: the answer ran in a fresh
+	// audit-only session that is not part of any continuation thread and is
+	// excluded from future derived-thread lookups.
+	Stateless bool `json:"stateless,omitempty"`
 }
 
 // ChatCompletionChoice is one completion alternative (the gateway always

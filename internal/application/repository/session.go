@@ -390,8 +390,11 @@ func (r *sessionRepository) UpdateLastRequestState(
 // recently active gateway session for (tenant, owner user, agent). Agent
 // binding lives in the agent_config JSONB (SessionLastRequestState.AgentID)
 // that createGatewaySession pins at creation; matching is dialect-aware
-// (jsonb ->> on PostgreSQL, json_extract on SQLite). Returns (nil, nil) when
-// no live thread exists — the gateway then falls back to a fresh session.
+// (jsonb ->> on PostgreSQL, json_extract on SQLite). Sessions created for
+// store=false turns (SessionLastRequestState.Stateless) are audit-only and
+// always excluded: a housekeeping call must never anchor — or hijack — the
+// conversation thread. Returns (nil, nil) when no live thread exists — the
+// gateway then falls back to a fresh session.
 func (r *sessionRepository) FindGatewayThreadSession(
 	ctx context.Context, tenantID uint64, ownerUserID, agentID string, activeAfter time.Time,
 ) (*types.Session, error) {
@@ -399,9 +402,12 @@ func (r *sessionRepository) FindGatewayThreadSession(
 		Where("tenant_id = ? AND kind = ? AND user_id = ?", tenantID, types.SessionKindGateway, ownerUserID).
 		Where("updated_at >= ?", activeAfter)
 	if r.db.Dialector.Name() == "postgres" {
-		db = db.Where("agent_config->>'agent_id' = ?", agentID)
+		db = db.Where("agent_config->>'agent_id' = ?", agentID).
+			Where("COALESCE(agent_config->>'stateless','false') <> 'true'")
 	} else {
-		db = db.Where("json_extract(agent_config, '$.agent_id') = ?", agentID)
+		// SQLite json_extract decodes JSON booleans to integers (true → 1).
+		db = db.Where("json_extract(agent_config, '$.agent_id') = ?", agentID).
+			Where("COALESCE(json_extract(agent_config, '$.stateless'), 0) = 0")
 	}
 	var session types.Session
 	err := db.Order("updated_at DESC").First(&session).Error
