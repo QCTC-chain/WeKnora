@@ -1639,6 +1639,7 @@ export default {
       executionMultiTurnLabel: '멀티턴',
       executionMultiTurnDesc: '이전 턴을 대화 컨텍스트에 유지합니다(게이트웨이 연속 세션에 적용).',
       executionConfigSaved: '실행 파라미터가 업데이트되고 다시 게시되었습니다',
+      executionPatchIgnored: '서버가 실행 파라미터를 저장하지 않았습니다(서버 버전이 오래되어 해당 필드를 지원하지 않을 수 있습니다). WeKnora 서버를 업데이트한 후 다시 시도하세요.',
     },
 
     imageUpload: {

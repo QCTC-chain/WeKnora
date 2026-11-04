@@ -1642,6 +1642,7 @@ export default {
       executionMultiTurnLabel: '多輪對話',
       executionMultiTurnDesc: '將較早輪次保留進對話上下文（對閘道續輪會話生效）。',
       executionConfigSaved: '執行參數已更新並重新發布',
+      executionPatchIgnored: '服務端未保存執行參數（服務端版本可能過舊，不支援這兩個欄位）。請更新 WeKnora 服務端後重試。',
     },
 
     imageUpload: {

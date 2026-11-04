@@ -8177,6 +8177,7 @@ export default {
       executionMultiTurnLabel: 'Multi-turn',
       executionMultiTurnDesc: 'Keep earlier turns in the conversation context (applies to gateway continuation sessions).',
       executionConfigSaved: 'Execution parameters updated and re-published',
+      executionPatchIgnored: 'The server did not save the execution parameters (it may be an older build without support for these fields). Update the WeKnora server and retry.',
     },
     imageUpload: {
       navLabel: 'Attachment Upload',

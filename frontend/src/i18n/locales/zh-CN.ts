@@ -1642,6 +1642,7 @@ export default {
       executionMultiTurnLabel: '多轮对话',
       executionMultiTurnDesc: '将较早轮次保留进对话上下文（对网关续轮会话生效）。',
       executionConfigSaved: '执行参数已更新并重新发布',
+      executionPatchIgnored: '服务端未保存执行参数（服务端版本可能过旧，不支持这两个字段）。请更新 WeKnora 服务端后重试。',
     },
     imageUpload: {
       navLabel: '附件上传',

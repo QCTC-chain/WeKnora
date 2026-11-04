@@ -208,8 +208,28 @@ const execForm = ref<{
 }>({ allowed_tools: null, max_iterations: 10, multi_turn_enabled: false })
 const execDirty = ref(false)
 
-// 与后端检索工具一致的补齐集合；按旧名归一后去重，兼容历史配置。
+// 一键补齐的补齐集合；按旧名归一后去重，兼容历史配置。
 const KB_RETRIEVAL_TOOLS = ['search_knowledge', 'read_document', 'list_documents'] as const
+
+// 校验服务端确实保存了 PATCH 的执行参数。工具按旧名归一后比较集合
+// （服务端可能重排）；数值与开关直接比较，未发送（null）的字段跳过。
+function executionPatchAccepted(
+  requested: { allowed_tools: string[] | null; max_iterations: number; multi_turn_enabled: boolean },
+  saved: CustomAgent['config'] | undefined,
+): boolean {
+  if (!saved) return false
+  if (requested.allowed_tools != null) {
+    const sent = new Set(normalizeLegacyToolNames(requested.allowed_tools))
+    const back = new Set(normalizeLegacyToolNames(saved.allowed_tools ?? []))
+    if (sent.size !== back.size) return false
+    for (const tool of sent) {
+      if (!back.has(tool)) return false
+    }
+  }
+  if (requested.max_iterations !== undefined && saved.max_iterations !== requested.max_iterations) return false
+  if (saved.multi_turn_enabled !== requested.multi_turn_enabled) return false
+  return true
+}
 
 function hydrateExec(agent?: CustomAgent | null) {
   const cfg = agent?.config
@@ -325,13 +345,21 @@ async function handleSave() {
     // markExecDirty 已同时置 dirty，因此改过执行参数必然触发重发布刷新快照。
     const governanceNeeded = dirty.value
     if (execDirty.value) {
-      const cfgRes = await patchAgentExecution(props.agentId, {
+      const requested = {
         allowed_tools: execForm.value.allowed_tools,
         max_iterations: execForm.value.max_iterations,
         multi_turn_enabled: execForm.value.multi_turn_enabled,
-      })
+      }
+      const cfgRes = await patchAgentExecution(props.agentId, requested)
       const cfgNext = cfgRes?.data
       if (!cfgNext?.id) throw new Error(cfgRes?.message || t('agent.messages.saveFailed'))
+      // 旧版服务端不认识 allowed_tools/max_iterations 字段时会静默丢弃，
+      // 只有 multi_turn_enabled 落库 —— 表面成功实际没保存，再进页面
+      // 又会出现「一键补齐」按钮。校验响应，把这种不一致变成明确报错。
+      const saved = cfgNext.config ?? {}
+      if (!executionPatchAccepted(requested, saved)) {
+        throw new Error(t('agentEditor.gateway.executionPatchIgnored'))
+      }
       updated = cfgNext
     }
     if (governanceNeeded && updated) {

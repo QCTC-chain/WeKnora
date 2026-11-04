@@ -8177,6 +8177,7 @@ export default {
       executionMultiTurnLabel: 'マルチターン',
       executionMultiTurnDesc: '以前のターンを会話コンテキストに保持します（ゲートウェイの継続セッションに適用）。',
       executionConfigSaved: '実行パラメータを更新して再公開しました',
+      executionPatchIgnored: 'サーバーは実行パラメータを保存しませんでした（バージョンが古く、このフィールドに対応していない可能性があります）。WeKnora サーバーを更新して再試行してください。',
     },
 
     imageUpload: {
