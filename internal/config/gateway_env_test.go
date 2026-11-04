@@ -51,6 +51,37 @@ func TestApplyGatewayEnvOverridesCreatesSection(t *testing.T) {
 	}
 }
 
+// TestGatewayStripCitationTagsOverride pins the GATEWAY_STRIP_CITATION_TAGS
+// contract: inline WeKnora citation tags (<kb/>, <web/>) are stripped from
+// gateway answer text by default; only an explicit falsey value keeps the
+// raw tags on the wire.
+func TestGatewayStripCitationTagsOverride(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string // value for GATEWAY_STRIP_CITATION_TAGS (empty == unset)
+		want bool
+	}{
+		{"unset defaults to strip", "", true},
+		{"true keeps stripping", "true", true},
+		{"false keeps tags", "false", false},
+		{"0 keeps tags", "0", false},
+		{"garbage keeps tags", "banana", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GATEWAY_STRIP_CITATION_TAGS", tc.env)
+			cfg := &Config{Gateway: &GatewayConfig{}}
+			applyGatewayEnvOverrides(cfg)
+			if got := cfg.Gateway.EffectiveStripCitationTags(); got != tc.want {
+				t.Fatalf("gateway.strip_citation_tags = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if !(*GatewayConfig)(nil).EffectiveStripCitationTags() {
+		t.Fatal("nil gateway section must default to stripping citation tags")
+	}
+}
+
 // TestGatewayRequestTimeoutOverride covers GATEWAY_REQUEST_TIMEOUT: Go
 // durations, bare seconds, and garbage falling back to the default.
 func TestGatewayRequestTimeoutOverride(t *testing.T) {

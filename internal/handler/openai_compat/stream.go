@@ -261,6 +261,14 @@ type streamTranslator struct {
 	thoughtMode  string
 	progressMode string
 
+	// stripTags removes inline WeKnora citation tags (<kb/>, <web/>) from
+	// the answer body (gateway.strip_citation_tags, default on) so
+	// OpenAI-compatible clients get clean Markdown; the appended source
+	// list carries the citations. The stripper holds chunk-boundary
+	// fragments between feed calls (guarded by mu).
+	stripTags bool
+	stripper  citationTagStripper
+
 	// pendingTool holds the tool name of a tool_call whose result has not
 	// arrived yet (docs §8: same-name consecutive events merge into ONE
 	// line, sent once). The line is emitted when the result lands, as
@@ -351,11 +359,12 @@ func (t *streamTranslator) journalLocked(name, note string) {
 	t.journal = append(t.journal[:gatewayJournalMax-1], entry)
 }
 
-func newStreamTranslator(stream turnStream, thoughtMode, progressMode string) *streamTranslator {
+func newStreamTranslator(stream turnStream, thoughtMode, progressMode string, stripCitationTags bool) *streamTranslator {
 	return &streamTranslator{
 		stream:       stream,
 		thoughtMode:  thoughtMode,
 		progressMode: progressMode,
+		stripTags:    stripCitationTags,
 		startedAt:    time.Now(),
 		done:         make(chan struct{}),
 		complete:     make(chan struct{}),
@@ -484,8 +493,12 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 			return nil
 		}
 		t.mu.Lock()
-		t.answer.WriteString(data.Content)
-		if data.IsFallback && strings.TrimSpace(data.Content) != "" {
+		content := data.Content
+		if t.stripTags {
+			content = t.stripper.feed(content)
+		}
+		t.answer.WriteString(content)
+		if data.IsFallback && strings.TrimSpace(content) != "" {
 			// The fallback marker rides the first fallback chunk, mirroring
 			// the web stream's fallback note.
 			t.answer.WriteString("\n[未命中知识库,以下为模型直答]")
@@ -494,8 +507,8 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 			t.closeDone()
 		}
 		t.mu.Unlock()
-		if strings.TrimSpace(data.Content) != "" {
-			t.stream.contentLine(data.Content)
+		if strings.TrimSpace(content) != "" {
+			t.stream.contentLine(content)
 		}
 		return nil
 	})
@@ -614,6 +627,9 @@ func (t *streamTranslator) snapshot() (string, []*types.SearchResult, *Usage, er
 	text := t.answer.String()
 	if strings.TrimSpace(text) == "" && t.finalAnswer != "" {
 		text = t.finalAnswer
+		if t.stripTags {
+			text = stripCitationTagsComplete(text)
+		}
 	}
 	return text, t.refs, t.usage, t.failed
 }
@@ -659,6 +675,7 @@ func (h *GatewayHandler) runGatewayTurnStream(
 		stream,
 		h.gateway.EffectiveThoughtMode(),
 		h.gateway.EffectiveProgressMode(),
+		h.gateway.EffectiveStripCitationTags(),
 	)
 	bus := event.NewEventBus()
 	translator.register(bus)

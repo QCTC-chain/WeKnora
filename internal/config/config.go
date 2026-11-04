@@ -120,6 +120,13 @@ type GatewayConfig struct {
 	// already-spent tokens are not wasted. Env override:
 	// GATEWAY_CANCEL_ON_DISCONNECT.
 	CancelOnDisconnect *bool `yaml:"cancel_on_disconnect" json:"cancel_on_disconnect"`
+	// StripCitationTags removes WeKnora inline citation tags (<kb .../>,
+	// <web .../>) from the answer body served over the gateway. The tags
+	// are the WeKnora web frontend's citation contract; OpenAI-compatible
+	// clients cannot render them and they break Markdown display. The
+	// appended numbered source list still carries the citations. Default
+	// true. Env override: GATEWAY_STRIP_CITATION_TAGS.
+	StripCitationTags *bool `yaml:"strip_citation_tags" json:"strip_citation_tags"`
 	// PathPrefix is the mount point of the gateway surface. Default "/v1".
 	// Env override: GATEWAY_PATH_PREFIX.
 	PathPrefix string `yaml:"path_prefix" json:"path_prefix"`
@@ -248,6 +255,14 @@ func (g *GatewayConfig) EffectiveProgressMode() string {
 // cancel the internal run; the design default is true.
 func (g *GatewayConfig) EffectiveCancelOnDisconnect() bool {
 	return g == nil || g.CancelOnDisconnect == nil || *g.CancelOnDisconnect
+}
+
+// EffectiveStripCitationTags reports whether inline WeKnora citation tags
+// (<kb/>, <web/>) are stripped from gateway answer text; the default is
+// true: OpenAI clients cannot render the tags, and the appended source
+// list already carries the citations.
+func (g *GatewayConfig) EffectiveStripCitationTags() bool {
+	return g == nil || g.StripCitationTags == nil || *g.StripCitationTags
 }
 
 // EffectivePathPrefix returns the gateway mount point, nil-safe, with the
@@ -1116,6 +1131,10 @@ func applyGatewayEnvOverrides(cfg *Config) {
 	if value := strings.TrimSpace(os.Getenv("GATEWAY_CANCEL_ON_DISCONNECT")); value != "" {
 		cancel := gatewayTruthy(value)
 		gateway.CancelOnDisconnect = &cancel
+	}
+	if value := strings.TrimSpace(os.Getenv("GATEWAY_STRIP_CITATION_TAGS")); value != "" {
+		strip := gatewayTruthy(value)
+		gateway.StripCitationTags = &strip
 	}
 	if value := strings.TrimSpace(os.Getenv("GATEWAY_PATH_PREFIX")); value != "" {
 		gateway.PathPrefix = value

@@ -598,6 +598,13 @@ func (h *GatewayHandler) runGatewayTurn(
 	}
 	mu.Unlock()
 
+	// Inline citation tags (<kb/>, <web/>) are WeKnora web-frontend markup;
+	// OpenAI clients cannot render them. The numbered source list appended
+	// below carries the citations instead.
+	if h.gateway.EffectiveStripCitationTags() {
+		text = stripCitationTagsComplete(text)
+	}
+
 	if bridge != nil {
 		// M3-1: no answer text is owed; the tool_calls response ends this
 		// request. The assistant message stays open (awaiting input).

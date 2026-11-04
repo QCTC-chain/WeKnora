@@ -24,6 +24,7 @@ GATEWAY_ENABLED=true
 | `GATEWAY_PROGRESS_MODE` | `text` | 工具/进度行:`text` / `drop` |
 | `GATEWAY_AUDIT_PAYLOAD` | `false` | 审计明细是否留存用户 query(截断 2000 字符);默认只记元数据 |
 | `GATEWAY_CANCEL_ON_DISCONNECT` | `true` | 客户端断开是否取消内部运行;`false` 时跑完并照常落库 |
+| `GATEWAY_STRIP_CITATION_TAGS` | `true` | 从回答正文剥离 WeKnora 内联引用标签(`<kb …/>` / `<web …/>`);这些标签是 WeKnora 网页前端的引用契约,OpenAI 客户端无法渲染且会破坏 Markdown 显示。引用信息由文末 `参考来源` 编号列表承载;`false` 时保留原始标签 |
 
 ## 认证
 
@@ -103,7 +104,9 @@ curl -s $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" \
 }
 ```
 
-**流式**(SSE,`stream=true`):响应为 `text/event-stream`,帧格式 `data: {chat.completion.chunk}`,首个内容前每 `GATEWAY_HEARTBEAT_INTERVAL` 输出一行 `: keep-alive` 注释,以 `data: [DONE]` 结束;最后一个 chunk 带 `usage` 与 `meta`。思考过程按 `GATEWAY_THOUGHT_MODE` 进入 `delta.reasoning_content` 或正文;工具/进度按 `GATEWAY_PROGRESS_MODE` 输出单行状态文本(如 `[工具] knowledge_search → 3 条结果`)或丢弃。中途失败输出一个 `data: {"error":{…}}` 帧后仍以 `[DONE]` 收尾(HTTP 状态保持 200)。
+**引用输出**:智能体开启引用时,回答正文默认剥离 WeKnora 内联引用标签(`<kb …/>` / `<web …/>`,即网页端渲染为引用气泡的标记),文末追加纯文本的 `参考来源` 编号列表;需要保留原始标签时设置 `GATEWAY_STRIP_CITATION_TAGS=false`。
+
+**流式**(SSE,`stream=true`):响应为 `text/event-stream`,帧格式 `data: {chat.completion.chunk}`,首个内容前每 `GATEWAY_HEARTBEAT_INTERVAL` 输出一行 `: keep-alive` 注释,以 `data: [DONE]` 结束;最后一个 chunk 带 `usage` 与 `meta`。思考过程按 `GATEWAY_THOUGHT_MODE` 进入 `delta.reasoning_content` 或正文;工具/进度按 `GATEWAY_PROGRESS_MODE` 输出单行状态文本(如 `[工具] knowledge_search → 3 条结果`)或丢弃。引用标签剥离(见上)在流式与非流式路径行为一致,跨 chunk 拆开的标签也会完整移除。中途失败输出一个 `data: {"error":{…}}` 帧后仍以 `[DONE]` 收尾(HTTP 状态保持 200)。
 
 ```bash
 curl -N $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" \
