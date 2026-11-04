@@ -192,6 +192,19 @@ export function publishAgent(id: string, data: GatewayPublishPayload) {
   return patch<{ data: CustomAgent; message?: string }>(`/api/v1/agents/${id}`, data);
 }
 
+// PATCH /agents/:id 的网关执行参数：发布页直接修这些参数，先落配置再重新发布，
+// 快照冻结的才是新值。allowed_tools 省略保留存量；null 表示用后端默认工具，[] 表示不用内置工具。
+export interface GatewayExecutionPatch {
+  allowed_tools?: string[] | null;
+  max_iterations?: number;
+  multi_turn_enabled?: boolean;
+}
+
+// 修改网关执行参数（检索工具 / 迭代轮数 / 多轮对话），不影响发布治理。
+export function patchAgentExecution(id: string, data: GatewayExecutionPatch) {
+  return patch<{ data: CustomAgent; message?: string }>(`/api/v1/agents/${id}`, data);
+}
+
 // 创建智能体请求
 export interface CreateAgentRequest {
   name: string;

@@ -2113,6 +2113,16 @@ const applyInitialFieldHighlight = async (field: string) => {
 const onGatewayPublished = (agent: CustomAgent) => {
   if (savedAgent.value && savedAgent.value.id === agent.id) {
     savedAgent.value = agent;
+    // 面板可直接改网关执行参数（检索工具/迭代轮数/多轮），同步进编辑器表单，
+    // 避免之后编辑器存盘用旧值盖回。null 语义用 keepAllowedToolsUnset 表达。
+    if (agent.config) {
+      const tools = agent.config.allowed_tools;
+      formData.value.config.allowed_tools = [...(tools ?? [])];
+      keepAllowedToolsUnset.value = tools == null;
+      storedToolNames.value = [...(tools ?? [])];
+      formData.value.config.max_iterations = agent.config.max_iterations;
+      formData.value.config.multi_turn_enabled = agent.config.multi_turn_enabled;
+    }
   }
   emit('success', agent);
 };

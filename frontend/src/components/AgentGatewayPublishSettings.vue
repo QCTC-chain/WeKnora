@@ -33,6 +33,58 @@
       </div>
 
       <template v-if="form.published">
+        <!-- 网关执行参数：本次发布冻结进快照的 ReAct 配置 -->
+        <div class="gateway-publish-row gateway-publish-row--stack">
+          <div class="gateway-publish-row-title">{{ $t('agentEditor.gateway.executionTitle') }}</div>
+          <div class="gateway-publish-row-desc">{{ $t('agentEditor.gateway.executionDesc') }}</div>
+
+          <div class="gateway-exec-field">
+            <div class="gateway-exec-field-head">
+              <span class="gateway-exec-label">{{ $t('agentEditor.gateway.executionToolsLabel') }}</span>
+              <div class="gateway-exec-tools">
+                <template v-if="usesDefaultTools">
+                  <t-tag size="small" variant="light" theme="primary">{{ $t('agentEditor.gateway.executionToolsDefaults') }}</t-tag>
+                </template>
+                <template v-else-if="execForm.allowed_tools && execForm.allowed_tools.length">
+                  <t-tag v-for="tool in execForm.allowed_tools" :key="tool" size="small" variant="outline">{{ tool }}</t-tag>
+                </template>
+                <span v-else class="gateway-exec-none">{{ $t('agentEditor.gateway.executionToolsNone') }}</span>
+              </div>
+            </div>
+            <t-alert
+              v-if="retrievalMissing" class="gateway-publish-alert" theme="warning"
+              :message="$t('agentEditor.gateway.executionToolsWarning')" />
+            <t-button v-if="retrievalMissing" size="small" theme="primary" variant="outline"
+              :disabled="submitting" @click="fixKnowledgeTools">
+              {{ $t('agentEditor.gateway.executionToolsFix') }}
+            </t-button>
+          </div>
+
+          <div class="gateway-exec-field">
+            <div class="gateway-exec-field-head">
+              <span class="gateway-exec-label">{{ $t('agentEditor.gateway.executionIterationsLabel') }}</span>
+              <t-input-number v-model="execForm.max_iterations" class="gateway-exec-iterations"
+                :min="-1" :max="200" :step="1" theme="column" :disabled="submitting" @change="markExecDirty" />
+            </div>
+            <div class="gateway-publish-row-desc">
+              {{ execForm.max_iterations < 0
+                ? $t('agentEditor.gateway.executionIterationsUnlimited')
+                : $t('agentEditor.gateway.executionIterationsHint') }}
+            </div>
+            <t-alert
+              v-if="singleRoundRetrieval" class="gateway-publish-alert" theme="warning"
+              :message="$t('agentEditor.gateway.executionIterationsWarning')" />
+          </div>
+
+          <div class="gateway-exec-field gateway-exec-field--row">
+            <div>
+              <div class="gateway-exec-label">{{ $t('agentEditor.gateway.executionMultiTurnLabel') }}</div>
+              <div class="gateway-publish-row-desc">{{ $t('agentEditor.gateway.executionMultiTurnDesc') }}</div>
+            </div>
+            <t-switch v-model="execForm.multi_turn_enabled" :disabled="submitting" @change="markExecDirty" />
+          </div>
+        </div>
+
         <!-- 调用范围 -->
         <div class="gateway-publish-row gateway-publish-row--stack">
           <div class="gateway-publish-row-title">{{ $t('agentEditor.gateway.scopeLabel') }}</div>
@@ -108,7 +160,14 @@ import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { integrationSectionKey } from '@/config/settingsRoute'
 import { copyWithToast } from '@/utils/clipboard'
-import { publishAgent, type CustomAgent, type GatewayPublishScope, type GatewayToolPolicy } from '@/api/agent'
+import { allowedToolsInclude, normalizeLegacyToolNames } from '@/utils/legacy-tool-names'
+import {
+  patchAgentExecution,
+  publishAgent,
+  type CustomAgent,
+  type GatewayPublishScope,
+  type GatewayToolPolicy,
+} from '@/api/agent'
 
 interface Props {
   agentId: string
@@ -140,6 +199,59 @@ const form = ref<{
   sunset: string;
 }>({ published: false, scope: 'tenant', policy: 'all', sunset: '' })
 
+// 网关执行参数：发布快照冻结的 ReAct 配置。allowed_tools 为 null 表示后端
+// 默认工具，[] 表示不用内置工具，与编辑器存盘语义一致。
+const execForm = ref<{
+  allowed_tools: string[] | null;
+  max_iterations: number;
+  multi_turn_enabled: boolean;
+}>({ allowed_tools: null, max_iterations: 10, multi_turn_enabled: false })
+const execDirty = ref(false)
+
+// 与后端检索工具一致的补齐集合；按旧名归一后去重，兼容历史配置。
+const KB_RETRIEVAL_TOOLS = ['search_knowledge', 'read_document', 'list_documents'] as const
+
+function hydrateExec(agent?: CustomAgent | null) {
+  const cfg = agent?.config
+  execForm.value.allowed_tools = cfg?.allowed_tools == null ? null : [...cfg.allowed_tools]
+  execForm.value.max_iterations = cfg?.max_iterations ?? 10
+  execForm.value.multi_turn_enabled = !!cfg?.multi_turn_enabled
+  execDirty.value = false
+}
+
+const boundKnowledgeBase = computed(() => {
+  const cfg = props.agent?.config
+  if (!cfg) return false
+  return cfg.kb_selection_mode === 'all' || (cfg.knowledge_bases?.length ?? 0) > 0
+})
+const usesDefaultTools = computed(() => execForm.value.allowed_tools == null)
+const hasRetrievalTool = computed(() =>
+  allowedToolsInclude(execForm.value.allowed_tools, 'search_knowledge'))
+// 绑了知识库却没有检索工具：网关由智能体自主检索，缺工具只会得到
+// "无检索证据"式的拒答。默认工具集自带检索，不算缺失。
+const retrievalMissing = computed(() =>
+  boundKnowledgeBase.value && !usesDefaultTools.value && !hasRetrievalTool.value)
+// 只给一轮：第一轮发起工具调用，没有第二轮整合证据作答。
+const singleRoundRetrieval = computed(() =>
+  boundKnowledgeBase.value && !usesDefaultTools.value
+  && hasRetrievalTool.value && execForm.value.max_iterations === 1)
+
+const markExecDirty = () => {
+  execDirty.value = true
+  dirty.value = true
+}
+
+// 一键补齐检索工具；若只有 1 轮迭代同时提到 5，否则工具结果没有轮次整合。
+function fixKnowledgeTools() {
+  const merged = normalizeLegacyToolNames(execForm.value.allowed_tools ?? [])
+  for (const tool of KB_RETRIEVAL_TOOLS) {
+    if (!merged.includes(tool)) merged.push(tool)
+  }
+  execForm.value.allowed_tools = merged
+  if (execForm.value.max_iterations === 1) execForm.value.max_iterations = 5
+  markExecDirty()
+}
+
 function hydrate(agent?: CustomAgent | null) {
   form.value.published = !!agent?.published
   const scope = (agent?.gateway_scope || 'tenant') as GatewayPublishScope
@@ -147,6 +259,7 @@ function hydrate(agent?: CustomAgent | null) {
   const policy = (agent?.config?.gateway_tool_policy || 'all') as GatewayToolPolicy
   form.value.policy = policy
   form.value.sunset = agent?.deprecation_sunset ? String(agent.deprecation_sunset) : ''
+  hydrateExec(agent)
   dirty.value = false
 }
 
@@ -206,22 +319,45 @@ async function handleSave() {
   if (!props.agentId || submitting.value) return
   submitting.value = true
   try {
-    const payload: Record<string, unknown> = { published: form.value.published }
-    if (form.value.published) {
-      payload.published_scope = form.value.scope
-      payload.gateway_tool_policy = form.value.policy
-      const sunset = normalizeSunset(form.value.sunset)
-      if (sunset !== undefined) payload.deprecation_sunset = sunset
+    let updated = props.agent ?? null
+    // 保存键同时承担两件事：执行参数落配置、治理变更重发布。顺序不能反：
+    // 发布快照冻结的是当时的存量配置，先发布后改参数会把旧值冻进版本。
+    // markExecDirty 已同时置 dirty，因此改过执行参数必然触发重发布刷新快照。
+    const governanceNeeded = dirty.value
+    if (execDirty.value) {
+      const cfgRes = await patchAgentExecution(props.agentId, {
+        allowed_tools: execForm.value.allowed_tools,
+        max_iterations: execForm.value.max_iterations,
+        multi_turn_enabled: execForm.value.multi_turn_enabled,
+      })
+      const cfgNext = cfgRes?.data
+      if (!cfgNext?.id) throw new Error(cfgRes?.message || t('agent.messages.saveFailed'))
+      updated = cfgNext
     }
-    const result = await publishAgent(props.agentId, payload)
-    const updated = result?.data
-    if (!updated?.id) throw new Error(result?.message || t('agent.messages.saveFailed'))
+    if (governanceNeeded && updated) {
+      const payload: Record<string, unknown> = { published: form.value.published }
+      if (form.value.published) {
+        payload.published_scope = form.value.scope
+        payload.gateway_tool_policy = form.value.policy
+        const sunset = normalizeSunset(form.value.sunset)
+        if (sunset !== undefined) payload.deprecation_sunset = sunset
+      }
+      const result = await publishAgent(props.agentId, payload)
+      const pubNext = result?.data
+      if (!pubNext?.id) throw new Error(result?.message || t('agent.messages.saveFailed'))
+      updated = pubNext
+    }
+    if (!updated?.id) throw new Error(t('agent.messages.saveFailed'))
     dirty.value = false
     hydrate(updated)
     emit('updated', updated)
-    MessagePlugin.success(
-      updated.published ? t('agentEditor.gateway.publishSuccess') : t('agentEditor.gateway.unpublishSuccess'),
-    )
+    if (governanceNeeded) {
+      MessagePlugin.success(
+        updated.published ? t('agentEditor.gateway.publishSuccess') : t('agentEditor.gateway.unpublishSuccess'),
+      )
+    } else {
+      MessagePlugin.success(t('agentEditor.gateway.executionConfigSaved'))
+    }
   } catch (e: any) {
     MessagePlugin.error(e?.message || t('agent.messages.saveFailed'))
   } finally {
@@ -324,6 +460,49 @@ async function handleSave() {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.gateway-exec-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding-top: 4px;
+}
+
+.gateway-exec-field--row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.gateway-exec-field-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.gateway-exec-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--td-text-color-primary);
+}
+
+.gateway-exec-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.gateway-exec-none {
+  font-size: 12px;
+  color: var(--td-text-color-secondary);
+}
+
+.gateway-exec-iterations {
+  width: 140px;
 }
 
 .gateway-publish-footer {

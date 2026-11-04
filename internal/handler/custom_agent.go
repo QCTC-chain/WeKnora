@@ -171,6 +171,16 @@ type PatchAgentRequest struct {
 	WebSearchProviderID *string `json:"web_search_provider_id" extensions:"x-agent"`
 	// Whether earlier turns are kept in the conversation context
 	MultiTurnEnabled *bool `json:"multi_turn_enabled" extensions:"x-agent"`
+	// AllowedTools replaces the built-in tool allowlist. Omitted keeps the
+	// stored value; null means the runtime defaults, an empty list means no
+	// built-in tools, and tool names are validated like PUT/POST. A gateway
+	// agent that binds knowledge bases without a retrieval tool cannot fetch
+	// evidence, so the publish panel edits this alongside publishing.
+	AllowedTools *[]string `json:"allowed_tools" extensions:"x-agent"`
+	// MaxIterations caps the tool-call rounds one turn may run (ReAct).
+	// Negative means unlimited; omitted keeps the stored value. A single
+	// round leaves no round to synthesize tool results into an answer.
+	MaxIterations *int `json:"max_iterations" extensions:"x-agent"`
 	// Publish (true) or unpublish (false) the agent for the OpenAI-compatible
 	// model gateway (/v1). Publishing rejects a name that another published
 	// agent in the workspace already uses (case-insensitive).
@@ -208,7 +218,7 @@ func (p PatchAgentRequest) publishOnly() bool {
 		p.KnowledgeBases == nil && p.MCPSelectionMode == nil && p.MCPServices == nil &&
 		p.SkillsSelectionMode == nil && p.SelectedSkills == nil &&
 		p.WebSearchEnabled == nil && p.WebSearchProviderID == nil &&
-		p.MultiTurnEnabled == nil
+		p.MultiTurnEnabled == nil && p.AllowedTools == nil && p.MaxIterations == nil
 }
 
 // applyPublishPatch reports whether any publish-governance field is present
@@ -304,6 +314,12 @@ func (p PatchAgentRequest) apply(agent *types.CustomAgent) UpdateAgentRequest {
 	}
 	if p.MultiTurnEnabled != nil {
 		cfg.MultiTurnEnabled = *p.MultiTurnEnabled
+	}
+	if p.AllowedTools != nil {
+		cfg.AllowedTools = append([]string{}, *p.AllowedTools...)
+	}
+	if p.MaxIterations != nil {
+		cfg.MaxIterations = *p.MaxIterations
 	}
 	return req
 }
@@ -675,7 +691,7 @@ func (h *CustomAgentHandler) UpdateAgent(c *gin.Context) {
 // @Security     Bearer
 // @Security     ApiKeyAuth
 // @x-agent      {"id":"agent.update","risk":"write","target":"agent.get","label":"name","require_complete_target":true}
-// @x-agent-hint "Changes the listed settings of an agent; a field left out is kept. agent_mode is quick-answer or smart-reasoning; MCP services and skills only run in smart-reasoning, and switching to it turns multi-turn on. system_prompt replaces the whole prompt, so start from the full prompt agent.get returns. Take model_id from model.list (a KnowledgeQA model), knowledge base ids from knowledge_base.list and MCP service ids from mcp_service.list. Take web_search_provider_id from web_search_provider.list; an empty value follows the workspace default, and selecting a provider does not change web_search_enabled. Take skill names exactly from skill.list with the agent's sandbox_config_id. knowledge_base_ids, mcp_service_ids or selected_skills alone also switch that scope to selected."
+// @x-agent-hint "Changes the listed settings of an agent; a field left out is kept. agent_mode is quick-answer or smart-reasoning; MCP services and skills only run in smart-reasoning, and switching to it turns multi-turn on. system_prompt replaces the whole prompt, so start from the full prompt agent.get returns. Take model_id from model.list (a KnowledgeQA model), knowledge base ids from knowledge_base.list and MCP service ids from mcp_service.list. Take web_search_provider_id from web_search_provider.list; an empty value follows the workspace default, and selecting a provider does not change web_search_enabled. Take skill names exactly from skill.list with the agent's sandbox_config_id. knowledge_base_ids, mcp_service_ids or selected_skills alone also switch that scope to selected. allowed_tools: omitted keeps the stored list, null restores the runtime default tools, [] disables built-in tools (an agent with knowledge bases but no retrieval tool answers without evidence); max_iterations: negative means unlimited, 1 leaves no round to synthesize tool results into an answer."
 // @Router       /agents/{id} [patch]
 func (h *CustomAgentHandler) PatchAgent(c *gin.Context) {
 	ctx := c.Request.Context()

@@ -80,6 +80,58 @@ func TestPatchAgentKeepsFieldsItDoesNotCarry(t *testing.T) {
 	assert.Equal(t, types.AgentModeQuickAnswer, got.Config.AgentMode)
 }
 
+// The publish panel edits the gateway execution parameters (which tools the
+// ReAct loop may call, how many rounds it gets) alongside publishing, so a
+// knowledge-bound agent published without retrieval tools is fixable from
+// the UI instead of answering "no retrieval evidence" forever.
+func TestPatchAgentGatewayExecutionParams(t *testing.T) {
+	retrievalPatch := `{"allowed_tools":["search_knowledge","read_document"],"max_iterations":5}`
+	t.Run("patches tools and iterations", func(t *testing.T) {
+		repo := &agentAvatarRepository{agent: patchTestAgent()}
+		rec := servePatch(t, repo, retrievalPatch)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, 1, repo.writes)
+		cfg := repo.agent.Config
+		assert.Equal(t, []string{"search_knowledge", "read_document"}, cfg.AllowedTools)
+		assert.Equal(t, 5, cfg.MaxIterations)
+		// Carrying only config fields still keeps everything else.
+		assert.Equal(t, []string{"kb-1"}, cfg.KnowledgeBases)
+		assert.Equal(t, "Support", repo.agent.Name)
+		assert.Equal(t, "model-1", cfg.ModelID)
+	})
+
+	t.Run("empty list means no tools, absent keeps stored", func(t *testing.T) {
+		repo := &agentAvatarRepository{agent: patchTestAgent()}
+		repo.agent.Config.MaxIterations = 3
+		rec := servePatch(t, repo, `{"allowed_tools":[]}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		cfg := repo.agent.Config
+		assert.NotNil(t, cfg.AllowedTools, "[] must land as an explicit no-tools list")
+		assert.Empty(t, cfg.AllowedTools)
+		assert.Equal(t, 3, cfg.MaxIterations, "an absent field keeps the stored value")
+
+		rec = servePatch(t, repo, `{"multi_turn_enabled":true}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Empty(t, repo.agent.Config.AllowedTools)
+		assert.Equal(t, 3, repo.agent.Config.MaxIterations)
+		assert.True(t, repo.agent.Config.MultiTurnEnabled)
+	})
+
+	t.Run("unknown tool name is rejected", func(t *testing.T) {
+		repo := &agentAvatarRepository{agent: patchTestAgent()}
+		rec := servePatch(t, repo, `{"allowed_tools":["no_such_tool"]}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Zero(t, repo.writes)
+	})
+
+	t.Run("negative iterations means unlimited", func(t *testing.T) {
+		repo := &agentAvatarRepository{agent: patchTestAgent()}
+		rec := servePatch(t, repo, `{"max_iterations":-1}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, -1, repo.agent.Config.MaxIterations)
+	})
+}
+
 func TestPatchAgentSelectionLists(t *testing.T) {
 	repo := &agentAvatarRepository{agent: patchTestAgent()}
 	repo.agent.Config.KBSelectionMode = "all"
