@@ -62,3 +62,45 @@ func TestRerankRequirementSeparatesUnsetFromEmptyToolList(t *testing.T) {
 	require.True(t, agentRequiresRerankModel(agent(nil)), "the default tools include search_knowledge")
 	require.False(t, agentRequiresRerankModel(agent([]string{})), "no tool calls the reranker")
 }
+
+// knowledgeToolFallback rescues exactly the broken stored state: an explicit
+// empty allowlist on an agent that still binds knowledge bases and can pay
+// for search_knowledge with its own rerank model. Every other shape is left
+// alone.
+func TestKnowledgeToolFallbackTargetsEmptyAllowlistWithBoundKBs(t *testing.T) {
+	make := func(allowed []string, mode string, kbs []string, rerank string) *types.CustomAgent {
+		return &types.CustomAgent{ID: "agt-1", Config: types.CustomAgentConfig{
+			KBSelectionMode: mode, KnowledgeBases: kbs, AllowedTools: allowed, RerankModelID: rerank,
+		}}
+	}
+	boundKBs := []string{"kb-1", "kb-2"}
+
+	fallback, ok := knowledgeToolFallback(make([]string{}, "selected", boundKBs, "rerank-1"))
+	require.True(t, ok, "explicit empty allowlist with bound KBs is the broken state")
+	require.Equal(t,
+		[]string{tools.ToolSearchKnowledge, tools.ToolReadDocument, tools.ToolListDocuments}, fallback)
+
+	// Applying the fallback keeps the rerank contract consistent: the agent
+	// now requires the rerank model it already declares.
+	rescued := make([]string{}, "selected", boundKBs, "rerank-1")
+	rescued.Config.AllowedTools, _ = knowledgeToolFallback(rescued)
+	require.True(t, agentRequiresRerankModel(rescued))
+
+	for name, agent := range map[string]*types.CustomAgent{
+		"nil agent": nil,
+		"unset allowlist already selects the defaults":      make(nil, "selected", boundKBs, "rerank-1"),
+		"non-empty allowlist is the caller's choice":        make([]string{"search_knowledge"}, "selected", boundKBs, "rerank-1"),
+		"KB scope disabled":                                 make([]string{}, "none", boundKBs, "rerank-1"),
+		"no knowledge bases bound":                          make([]string{}, "selected", nil, "rerank-1"),
+		"no rerank model must not turn into a turn failure": make([]string{}, "selected", boundKBs, ""),
+	} {
+		_, ok := knowledgeToolFallback(agent)
+		require.False(t, ok, "case %s must keep today's behavior", name)
+	}
+
+	// Unset mode defaults to selected behavior; all-mode binds tenant-wide.
+	for _, mode := range []string{"", "all"} {
+		_, ok := knowledgeToolFallback(make([]string{}, mode, boundKBs, "rerank-1"))
+		require.True(t, ok, "mode %q with bound KBs is still the broken state", mode)
+	}
+}

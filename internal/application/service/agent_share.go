@@ -59,6 +59,34 @@ func agentRequiresRerankModel(agent *types.CustomAgent) bool {
 	return false
 }
 
+// knowledgeToolFallback returns the KB retrieval tool subset an agent should
+// run with when its allowlist was saved explicitly empty while knowledge
+// bases stay bound. Such a stored state registers zero built-in tools
+// (EffectiveAllowedTools takes an empty list literally), so agentic retrieval
+// never runs and every turn answers without evidence: the KB directory the
+// runtime context injects is navigation text, not retrieval. The rag-qa
+// preset's KB tool subset restores agentic retrieval without touching
+// anything the caller chose deliberately.
+//
+// The fallback applies only when the agent declares a rerank model: enabling
+// search_knowledge makes agentRequiresRerankModel true and the AgentQA turn
+// then hard-requires one, so the fallback must not convert a silent
+// no-retrieval into a turn failure. An unset allowlist (nil) already selects
+// the defaults, a non-empty allowlist is the caller's choice, KBSelectionMode
+// "none" and unbound agents have nothing to retrieve.
+func knowledgeToolFallback(agent *types.CustomAgent) ([]string, bool) {
+	if agent == nil || agent.Config.AllowedTools == nil || len(agent.Config.AllowedTools) != 0 {
+		return nil, false
+	}
+	if agent.Config.KBSelectionMode == "none" || len(agent.Config.KnowledgeBases) == 0 {
+		return nil, false
+	}
+	if agent.Config.RerankModelID == "" {
+		return nil, false
+	}
+	return []string{tools.ToolSearchKnowledge, tools.ToolReadDocument, tools.ToolListDocuments}, true
+}
+
 // pickWorkspaceRerankModelID chooses the rerank model for an agent that
 // cannot be configured with one: the workspace's default active rerank
 // model, else its first active one, else none.

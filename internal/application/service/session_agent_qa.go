@@ -100,6 +100,18 @@ func (s *sessionService) AgentQA(
 	// Ensure defaults are set
 	req.CustomAgent.EnsureDefaults()
 
+	// Hardening: an agent saved with an explicitly empty allowlist while
+	// knowledge bases stay bound registers no retrieval tools, so agentic
+	// turns answer without any evidence even though sources are selected
+	// (the KB directory in the runtime context is navigation, not
+	// retrieval). Restore the KB retrieval subset when the agent can carry
+	// it; an unset or non-empty allowlist is always respected as-is.
+	if fallback, ok := knowledgeToolFallback(req.CustomAgent); ok {
+		logger.Warnf(ctx, "Agent %s allows no tools but binds %d knowledge base(s); restoring KB retrieval tools %v",
+			req.CustomAgent.ID, len(req.CustomAgent.Config.KnowledgeBases), fallback)
+		req.CustomAgent.Config.AllowedTools = fallback
+	}
+
 	// Build AgentConfig from custom agent and tenant info
 	agentConfig, err := s.buildAgentConfig(ctx, req, tenantInfo, agentTenantID)
 	if err != nil {
