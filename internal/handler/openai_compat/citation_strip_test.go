@@ -146,3 +146,42 @@ func TestChatCompletionsStripsCitationTags(t *testing.T) {
 	assert.Equal(t, "根据手册保修 2 年。\n---\n参考来源:\n1. 手册", resp.Choices[0].Message.Content)
 	assert.NotContains(t, resp.Choices[0].Message.Content, "<kb")
 }
+
+// whitespaceScript emits a Markdown answer where the newlines and spaces
+// between blocks arrive as STANDALONE deltas — the exact streaming shape
+// that used to be dropped by the whitespace-only gate and crammed headings
+// onto one line for clients (DB stayed clean, the wire did not).
+func whitespaceScript(bus *event.EventBus, _ *types.QARequest) error {
+	emit := func(typ event.EventType, data interface{}) error {
+		return bus.Emit(context.Background(), event.Event{Type: typ, Data: data})
+	}
+	for _, chunk := range []string{"## 教育背景", "\n\n", "- 第一条", "\n", "- 第二条", " ", "正文。"} {
+		if err := emit(event.EventAgentFinalAnswer, event.AgentFinalAnswerData{Content: chunk}); err != nil {
+			return err
+		}
+	}
+	if err := emit(event.EventAgentFinalAnswer, event.AgentFinalAnswerData{Content: "", Done: true}); err != nil {
+		return err
+	}
+	return emit(event.EventAgentComplete, event.AgentCompleteData{
+		FinalAnswer: "## 教育背景\n\n- 第一条\n- 第二条 正文。",
+		Usage:       &types.TokenUsage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12},
+	})
+}
+
+func TestChatCompletionsStreamKeepsWhitespaceDeltas(t *testing.T) {
+	fakes := streamFakes(whitespaceScript)
+	rec := serveCompletions(t, fakes, streamBody("agt-1"), "user-9")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	frames := parseSSE(t, rec.Body.String())
+	var content strings.Builder
+	for i := 1; i < len(frames)-1; i++ {
+		chunk := decodeChunk(t, frames[i])
+		if chunk.Choices[0].Delta != nil {
+			content.WriteString(chunk.Choices[0].Delta.Content)
+		}
+	}
+	// The client must see the exact clean Markdown, whitespace included.
+	assert.Equal(t, "## 教育背景\n\n- 第一条\n- 第二条 正文。", content.String())
+}

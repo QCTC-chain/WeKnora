@@ -507,7 +507,12 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 			t.closeDone()
 		}
 		t.mu.Unlock()
-		if strings.TrimSpace(content) != "" {
+		if content != "" {
+			// Whitespace-only deltas are real Markdown: the newlines and
+			// spaces between blocks often arrive as standalone chunks, and
+			// dropping them crams headings and list items onto one line for
+			// clients while the persisted answer stays clean. Only skip
+			// genuinely empty deltas.
 			t.stream.contentLine(content)
 		}
 		return nil

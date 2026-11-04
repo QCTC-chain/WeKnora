@@ -496,7 +496,9 @@ func (s *anthropicStream) closeBlockLocked() {
 func (s *anthropicStream) beginAssistant() {} // message_start already sent
 
 func (s *anthropicStream) contentLine(line string) {
-	if strings.TrimSpace(line) == "" {
+	if line == "" {
+		// Whitespace-only deltas carry the newlines between Markdown blocks;
+		// dropping them crams headings and list items onto one line.
 		return
 	}
 	s.markTTFB()
