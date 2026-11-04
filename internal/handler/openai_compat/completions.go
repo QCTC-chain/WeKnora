@@ -165,6 +165,13 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 		writeProtoParam(c, proto, http.StatusBadRequest, "messages", err.Error())
 		return
 	}
+	// Harness session-title probes are utility turns: keep the agent's
+	// identity and model binding, strip the knowledge machinery a title can
+	// never use (title_turn.go). Every other request keeps the published
+	// agent as-is.
+	if isSessionTitleTurn(req.Messages) {
+		agent = utilityAgentView(agent)
+	}
 	turn.ClientTools = clientTools
 
 	// Per-key concurrency (docs §9): over-limit requests answer 429
