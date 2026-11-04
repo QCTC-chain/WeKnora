@@ -4039,9 +4039,15 @@ watch(agentMode, (val, _oldVal) => {
       }
     }
   } else {
-    // 切换到普通模式，清空工具
-    formData.value.config.allowed_tools = [];
-    formData.value.config.max_iterations = 1; // 设置为1表示单轮 RAG
+    // 切换到普通模式，清空工具。加载智能体时不清：allowed_tools/max_iterations
+    // 是已保存的意图，发布为模型后快速问答智能体在网关侧同样靠这些工具检索。
+    // 默认表单是 smart-reasoning，打开 quick-answer 智能体必触发本分支；
+    // 不加守卫的话，打开即清空，用户随手保存编辑器就会把发布页
+    // 「一键补齐检索工具」的结果冲掉。
+    if (!isInitializing.value) {
+      formData.value.config.allowed_tools = [];
+      formData.value.config.max_iterations = 1; // 设置为1表示单轮 RAG
+    }
     // 切换到快速问答模式时，如果系统提示词是 Agent 的默认值或为空，替换为快速问答默认提示词
     if (defaultNormalSystemPrompt.value) {
       const isDefaultAgentPrompt = formData.value.config.system_prompt === defaultAgentSystemPrompt.value;
