@@ -269,6 +269,11 @@ type streamTranslator struct {
 	stripTags bool
 	stripper  citationTagStripper
 
+	// brand rewrites the product name in streamed reasoning to the published
+	// agent's own name, so third-party clients never show the vendor brand in
+	// the thinking trace.
+	brand *brandRewriter
+
 	// pendingTool holds the tool name of a tool_call whose result has not
 	// arrived yet (docs §8: same-name consecutive events merge into ONE
 	// line, sent once). The line is emitted when the result lands, as
@@ -359,12 +364,13 @@ func (t *streamTranslator) journalLocked(name, note string) {
 	t.journal = append(t.journal[:gatewayJournalMax-1], entry)
 }
 
-func newStreamTranslator(stream turnStream, thoughtMode, progressMode string, stripCitationTags bool) *streamTranslator {
+func newStreamTranslator(stream turnStream, thoughtMode, progressMode string, stripCitationTags bool, brandName string) *streamTranslator {
 	return &streamTranslator{
 		stream:       stream,
 		thoughtMode:  thoughtMode,
 		progressMode: progressMode,
 		stripTags:    stripCitationTags,
+		brand:        newBrandRewriter(brandName),
 		startedAt:    time.Now(),
 		done:         make(chan struct{}),
 		complete:     make(chan struct{}),
@@ -384,24 +390,65 @@ func (t *streamTranslator) content(line string) {
 	t.stream.contentLine(line)
 }
 
+// thoughtText rewrites one reasoning chunk (flushing on Done) under the
+// translator lock, so the stream-end flush cannot race with a late event.
+func (t *streamTranslator) thoughtText(chunk string, done bool) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := t.brand.feed(chunk)
+	if done {
+		out += t.brand.flush()
+	}
+	return out
+}
+
+// flushThought releases a reasoning fragment still held back for the
+// product-name rewrite when a run ends without the thought Done marker. It is
+// a no-op when nothing is held or reasoning is dropped.
+func (t *streamTranslator) flushThought() {
+	if t == nil || t.thoughtMode == config.GatewayThoughtModeDrop {
+		return
+	}
+	t.mu.Lock()
+	content := t.brand.flush()
+	t.mu.Unlock()
+	if content == "" {
+		return
+	}
+	if t.thoughtMode == config.GatewayThoughtModeCollapse {
+		t.content("<think>" + content + "</think>")
+		return
+	}
+	t.stream.reasoningDelta(content)
+}
+
 // register wires the translator onto the bus. Unknown/ignored event classes
 // (chat.*, plan/step, compaction, memory, artifacts…) simply have no handler.
 func (t *streamTranslator) register(bus *event.EventBus) {
 	bus.On(event.EventAgentThought, func(_ context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.AgentThoughtData)
-		if !ok || strings.TrimSpace(data.Content) == "" {
+		if !ok {
 			return nil
 		}
-		switch t.thoughtMode {
-		case config.GatewayThoughtModeDrop:
+		if t.thoughtMode == config.GatewayThoughtModeDrop {
+			if strings.TrimSpace(data.Content) == "" {
+				return nil
+			}
 			gatewayMetrics.observeTranslationDrop(dropThoughtDropped)
 			t.journalDrop("thought", "dropped(thought_mode=drop)")
 			return nil
-		case config.GatewayThoughtModeCollapse:
-			t.content("<think>" + data.Content + "</think>")
-		default: // reasoning
-			t.stream.reasoningDelta(data.Content)
 		}
+		// Rewrite before the mode switch: collapse folds the rewritten thought
+		// into content, reasoning streams it as a delta.
+		content := t.thoughtText(data.Content, data.Done)
+		if strings.TrimSpace(content) == "" {
+			return nil
+		}
+		if t.thoughtMode == config.GatewayThoughtModeCollapse {
+			t.content("<think>" + content + "</think>")
+			return nil
+		}
+		t.stream.reasoningDelta(content)
 		return nil
 	})
 
@@ -681,6 +728,7 @@ func (h *GatewayHandler) runGatewayTurnStream(
 		h.gateway.EffectiveThoughtMode(),
 		h.gateway.EffectiveProgressMode(),
 		h.gateway.EffectiveStripCitationTags(),
+		agent.Name,
 	)
 	bus := event.NewEventBus()
 	translator.register(bus)
@@ -725,6 +773,7 @@ func (h *GatewayHandler) runGatewayTurnStream(
 		reason = timeoutReason(ctx, h.gateway)
 	}
 
+	translator.flushThought()
 	text, refs, usage, failure := translator.snapshot()
 	meta := &CompletionMeta{
 		Warnings:  turn.Warnings,
