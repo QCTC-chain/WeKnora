@@ -604,6 +604,8 @@ func (h *GatewayHandler) runGatewayTurn(
 	if h.gateway.EffectiveStripCitationTags() {
 		text = stripCitationTagsComplete(text)
 	}
+	// White-label the product name in the client-visible answer.
+	text = replaceBrandFold(text)
 
 	if bridge != nil {
 		// M3-1: no answer text is owed; the tool_calls response ends this
@@ -638,7 +640,7 @@ func (h *GatewayHandler) runGatewayTurn(
 	// the pre-citation default (enabled), preserving legacy agent configs.
 	if agent.Config.CitationEnabled == nil || *agent.Config.CitationEnabled {
 		if len(collected) > 0 {
-			text += "\n" + renderCitations(collected)
+			text += "\n" + replaceBrandFold(renderCitations(collected))
 		}
 	}
 

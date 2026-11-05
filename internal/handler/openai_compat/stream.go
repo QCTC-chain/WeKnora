@@ -269,10 +269,11 @@ type streamTranslator struct {
 	stripTags bool
 	stripper  citationTagStripper
 
-	// brand rewrites the product name in streamed reasoning to the published
-	// agent's own name, so third-party clients never show the vendor brand in
-	// the thinking trace.
-	brand *brandRewriter
+	// brand rewrites the product name in the reasoning channel; answerBrand
+	// does the same for the final-answer stream, so every client-visible text
+	// channel is white-labelled. Each channel needs its own hold-back state.
+	brand       brandRewriter
+	answerBrand brandRewriter
 
 	// pendingTool holds the tool name of a tool_call whose result has not
 	// arrived yet (docs §8: same-name consecutive events merge into ONE
@@ -364,13 +365,12 @@ func (t *streamTranslator) journalLocked(name, note string) {
 	t.journal = append(t.journal[:gatewayJournalMax-1], entry)
 }
 
-func newStreamTranslator(stream turnStream, thoughtMode, progressMode string, stripCitationTags bool, brandName string) *streamTranslator {
+func newStreamTranslator(stream turnStream, thoughtMode, progressMode string, stripCitationTags bool) *streamTranslator {
 	return &streamTranslator{
 		stream:       stream,
 		thoughtMode:  thoughtMode,
 		progressMode: progressMode,
 		stripTags:    stripCitationTags,
-		brand:        newBrandRewriter(brandName),
 		startedAt:    time.Now(),
 		done:         make(chan struct{}),
 		complete:     make(chan struct{}),
@@ -382,8 +382,12 @@ func (t *streamTranslator) closeComplete() {
 	t.compOnce.Do(func() { close(t.complete) })
 }
 
-// content emits one status text line in the answer channel.
+// content emits one status text line in the answer channel. Tool lines,
+// progress notes and appended citations are complete strings, so they are
+// rewritten in one pass; the final-answer stream keeps its own chunk-safe
+// rewriter (answerBrand).
 func (t *streamTranslator) content(line string) {
+	line = replaceBrandFold(line)
 	if strings.TrimSpace(line) == "" {
 		return
 	}
@@ -420,6 +424,20 @@ func (t *streamTranslator) flushThought() {
 		return
 	}
 	t.stream.reasoningDelta(content)
+}
+
+// flushAnswer releases a final-answer fragment still held back for the
+// product-name rewrite when the run ends without the answer Done marker.
+func (t *streamTranslator) flushAnswer() {
+	t.mu.Lock()
+	content := t.answerBrand.flush()
+	if content != "" {
+		t.answer.WriteString(content)
+	}
+	t.mu.Unlock()
+	if content != "" {
+		t.stream.contentLine(content)
+	}
 }
 
 // register wires the translator onto the bus. Unknown/ignored event classes
@@ -543,6 +561,13 @@ func (t *streamTranslator) register(bus *event.EventBus) {
 		content := data.Content
 		if t.stripTags {
 			content = t.stripper.feed(content)
+		}
+		// White-label the product name before it reaches either the client or
+		// the persisted assistant row. The rewriter holds a token split across
+		// chunks and releases it on Done.
+		content = t.answerBrand.feed(content)
+		if data.Done {
+			content += t.answerBrand.flush()
 		}
 		t.answer.WriteString(content)
 		if data.IsFallback && strings.TrimSpace(content) != "" {
@@ -682,6 +707,7 @@ func (t *streamTranslator) snapshot() (string, []*types.SearchResult, *Usage, er
 		if t.stripTags {
 			text = stripCitationTagsComplete(text)
 		}
+		text = replaceBrandFold(text)
 	}
 	return text, t.refs, t.usage, t.failed
 }
@@ -728,7 +754,6 @@ func (h *GatewayHandler) runGatewayTurnStream(
 		h.gateway.EffectiveThoughtMode(),
 		h.gateway.EffectiveProgressMode(),
 		h.gateway.EffectiveStripCitationTags(),
-		agent.Name,
 	)
 	bus := event.NewEventBus()
 	translator.register(bus)
@@ -774,6 +799,7 @@ func (h *GatewayHandler) runGatewayTurnStream(
 	}
 
 	translator.flushThought()
+	translator.flushAnswer()
 	text, refs, usage, failure := translator.snapshot()
 	meta := &CompletionMeta{
 		Warnings:  turn.Warnings,
@@ -819,7 +845,7 @@ func (h *GatewayHandler) runGatewayTurnStream(
 		// clients have no reference channel.
 		if agent.Config.CitationEnabled == nil || *agent.Config.CitationEnabled {
 			if len(refs) > 0 {
-				citations := renderCitations(refs)
+				citations := replaceBrandFold(renderCitations(refs))
 				translator.content("\n" + citations)
 				text += "\n" + citations
 			}
