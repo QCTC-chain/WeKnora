@@ -32,8 +32,28 @@ output_dir="$(cd "$output_dir" && pwd)"
 build_dir="$(mktemp -d /tmp/weknora-bsk-build.XXXXXX)"
 trap 'rm -rf "$build_dir"' EXIT
 
-git clone --no-checkout https://github.com/Tencent/BrowserSkill.git "$build_dir/source"
-git -C "$build_dir/source" checkout --detach "$source_commit"
+# 只浅 fetch pinned commit（GitHub 支持按任意 SHA fetch），避免全量历史 clone
+# 在不稳定代理/网络下传输大包时 TLS 中断（curl 56 GnuTLS recv error）。
+# 失败时自动重试；低速僵死连接由 http.lowSpeed* 尽早掐断交给重试。
+bsk_repo_url="https://github.com/Tencent/BrowserSkill.git"
+git init -q "$build_dir/source"
+git -C "$build_dir/source" remote add origin "$bsk_repo_url"
+git -C "$build_dir/source" config http.lowSpeedLimit 1000
+git -C "$build_dir/source" config http.lowSpeedTime 30
+bsk_fetch_ok=""
+for bsk_attempt in 1 2 3 4 5; do
+  if git -C "$build_dir/source" fetch --depth 1 origin "$source_commit"; then
+    bsk_fetch_ok=1
+    break
+  fi
+  echo "git fetch $bsk_repo_url failed (attempt $bsk_attempt/5), retrying in 10s..." >&2
+  sleep 10
+done
+[ -n "$bsk_fetch_ok" ] || { echo "git fetch failed after 5 attempts: $bsk_repo_url" >&2; exit 1; }
+git -C "$build_dir/source" checkout --detach FETCH_HEAD
+# 确保拿到的正是 release 基线 commit
+[ "$(git -C "$build_dir/source" rev-parse HEAD)" = "$source_commit" ] \
+  || { echo "fetched commit does not match pinned baseline $source_commit" >&2; exit 1; }
 (
   cd "$build_dir/source"
   npx --yes pnpm@10.17.0 install --frozen-lockfile
