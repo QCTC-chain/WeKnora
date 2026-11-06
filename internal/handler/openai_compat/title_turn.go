@@ -15,8 +15,9 @@ import (
 // title can never use.
 //
 // The probes are recognizable by their fixed instruction pair. A turn that
-// matches runs with the knowledge machinery stripped, so AgentQA degrades to
-// a single plain chat round on the agent's own model. Anything else —
+// matches runs with the knowledge machinery stripped, so the QA pipeline
+// (Agent engine or KnowledgeQA, by the frozen agent_mode) degrades to a
+// single plain chat round on the agent's own model. Anything else —
 // including any request that merely resembles one — keeps the published
 // agent untouched.
 const (

@@ -136,8 +136,11 @@ func (h *GatewayHandler) handleCompletions(c *gin.Context, proto string) {
 	// policy "none" keeps the M1 behavior (tools ignored); otherwise the
 	// caller's function tools are bridged into the run, and a follow-up
 	// whose tool messages carry gateway call IDs resumes the suspended run
-	// instead of starting a new turn.
-	bridgeEnabled := agent.Config.GatewayToolPolicy != "none"
+	// instead of starting a new turn. Quick-answer models run the RAG
+	// pipeline (KnowledgeQA), which has no client-tool bridge — the caller's
+	// tools can never be called, so the bridge stays off exactly like
+	// policy "none" (counted in meta.client_tools_ignored below).
+	bridgeEnabled := agent.Config.GatewayToolPolicy != "none" && agent.IsAgentMode()
 	clientTools, toolErr := validateClientTools(req.Tools)
 	if toolErr != nil {
 		writeProtoParam(c, proto, http.StatusBadRequest, "tools", toolErr.Error())
@@ -412,11 +415,14 @@ type turnOutcome struct {
 	bridge *bridgeSuspension
 }
 
-// runGatewayTurn creates the message rows, drives SessionService.AgentQA to
-// completion on the shared event vocabulary, and aggregates the final answer
-// plus references. It mirrors the MCP ask tool's synchronous path
+// runGatewayTurn creates the message rows, drives the published agent's QA
+// service to completion on the shared event vocabulary, and aggregates the
+// final answer plus references. It mirrors the MCP ask tool's synchronous path
 // (internal/mcpserver/tools_ask.go runQA) — same service entry, same
-// unattended semantics, TurnLeaseHeld=false.
+// unattended semantics, TurnLeaseHeld=false. Like the web chat handler
+// (internal/handler/session/qa.go), the frozen agent_mode picks the service:
+// smart-reasoning runs the ReAct engine (AgentQA), quick-answer runs the RAG
+// pipeline (KnowledgeQA).
 func (h *GatewayHandler) runGatewayTurn(
 	ctx context.Context, session *types.Session, agent *types.CustomAgent,
 	turn *renderedTurn, tm *turnMessages, qa *types.QARequest,
@@ -547,6 +553,7 @@ func (h *GatewayHandler) runGatewayTurn(
 	runCtx, cancel := context.WithTimeout(runParent, timeout)
 	defer cancel()
 
+	useAgent := agent.IsAgentMode()
 	onReturn := func(runErr error) {
 		mu.Lock()
 		if qaErr == nil {
@@ -561,20 +568,41 @@ func (h *GatewayHandler) runGatewayTurn(
 	timedOut := false
 	select {
 	case <-done:
-		// Agent mode: answer events arrived; give the completion event a
-		// grace window for usage/references (same as the MCP caller).
-		timer := time.NewTimer(askCompleteWait)
-		select {
-		case <-complete:
-		case <-runCtx.Done():
-		case <-timer.C:
-			logger.Warnf(ctx, "[gateway] timed out waiting for agent completion: session=%s", session.ID)
+		if useAgent {
+			// Agent mode: answer events arrived; give the completion event a
+			// grace window for usage/references (same as the MCP caller).
+			timer := time.NewTimer(askCompleteWait)
+			select {
+			case <-complete:
+			case <-runCtx.Done():
+			case <-timer.C:
+				logger.Warnf(ctx, "[gateway] timed out waiting for agent completion: session=%s", session.ID)
+			}
+			timer.Stop()
 		}
-		timer.Stop()
+		// Quick-answer pipeline (KnowledgeQA): the final answer chunk closed
+		// done, references already arrived (pre-answer), and no completion
+		// event follows — nothing left to wait for.
 	case <-complete:
 	case <-qaFinished:
-		// AgentQA returned without emitting answer/complete events: fall
-		// through to the empty-answer handling instead of burning budget.
+		if useAgent {
+			// AgentQA returned without emitting answer/complete events: fall
+			// through to the empty-answer handling instead of burning budget.
+			break
+		}
+		// KnowledgeQA returns right after initiating the async pipeline
+		// (session_knowledge_qa.go logs "initiated" and returns), so its
+		// return is NOT a completion signal — the answer is still streaming
+		// on the bus. Keep waiting for the final answer chunk; aggregating
+		// here would return "No answer could be produced" and cancel the
+		// in-flight LLM stream. Setup failures still surface promptly:
+		// onReturn closes done/complete with qaErr set.
+		select {
+		case <-done:
+		case <-complete:
+		case <-runCtx.Done():
+			timedOut = true
+		}
 	case <-runCtx.Done():
 		timedOut = true
 	}
@@ -705,16 +733,20 @@ func (h *GatewayHandler) createTurnMessages(
 	return userMsg, assistantMsg, nil
 }
 
-// launchAgentQA starts the SessionService.AgentQA goroutine. Ordinary turns
+// launchAgentQA starts the published agent's QA goroutine, routed by the
+// frozen snapshot's agent_mode exactly like the web chat handler
+// (internal/handler/session/qa.go): smart-reasoning runs SessionService.AgentQA
+// (ReAct engine), quick-answer runs SessionService.KnowledgeQA (RAG pipeline).
+// Ordinary turns
 // use the shared unattended semantics (docs §7.1): TurnLeaseHeld=false so the
 // service takes the session lease itself, Suspendable=false, Mode="" — the
 // same shape as the IM and MCP callers. M3-1 bridge turns (turn.ClientTools)
 // flip Suspendable on so a client-tool call can park the run for the caller;
 // the qa override (resume) replaces the built request entirely. onReturn
-// receives AgentQA's own return error (bus-level failures travel as error
-// events instead). The returned channel closes when AgentQA returns — with
-// or without events — so a run that finishes silently unblocks the waiters
-// instead of burning the whole request budget.
+// receives the QA service's own return error (bus-level failures travel as
+// error events instead). The returned channel closes when the service returns
+// — with or without events — so a run that finishes silently unblocks the
+// waiters instead of burning the whole request budget.
 func (h *GatewayHandler) launchAgentQA(
 	ctx context.Context,
 	session *types.Session,
@@ -756,7 +788,16 @@ func (h *GatewayHandler) launchAgentQA(
 			req.ClientTools = turn.ClientTools
 			req.Suspendable = len(turn.ClientTools) > 0
 		}
-		if runErr := h.sessions.AgentQA(ctx, req, bus); runErr != nil && onReturn != nil {
+		// Route by run mode (web-chat parity), but a prepared resume request
+		// is engine-shaped by construction: it continues a run that already
+		// suspended, and only the ReAct engine suspends.
+		var runErr error
+		if agent.IsAgentMode() || qa != nil {
+			runErr = h.sessions.AgentQA(ctx, req, bus)
+		} else {
+			runErr = h.sessions.KnowledgeQA(ctx, req, bus)
+		}
+		if runErr != nil && onReturn != nil {
 			onReturn(runErr)
 		}
 	}()

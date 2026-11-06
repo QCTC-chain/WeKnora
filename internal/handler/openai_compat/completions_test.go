@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -20,8 +21,9 @@ import (
 )
 
 // fakeGatewaySessions implements the SessionService slice the gateway uses:
-// session creation, owner binding, and the AgentQA run (which replays a
-// script of events on the bus it is handed).
+// session creation, owner binding, and the QA run (AgentQA / KnowledgeQA,
+// routed by the frozen agent_mode; both replay a script of events on the bus
+// they are handed).
 type fakeGatewaySessions struct {
 	interfaces.SessionService
 
@@ -29,7 +31,11 @@ type fakeGatewaySessions struct {
 	created     *types.Session
 	ownerID     string
 	ownerTenant uint64
-	qaRequests  []*types.QARequest
+	// qaRequests records every QA turn regardless of route; the counters
+	// pin which service the frozen agent_mode routed to.
+	qaRequests []*types.QARequest
+	kbCalls    int // KnowledgeQA invocations (quick-answer route)
+	agentCalls int // AgentQA invocations (smart-reasoning route)
 
 	script func(bus *event.EventBus, req *types.QARequest) error
 
@@ -75,6 +81,18 @@ func (f *fakeGatewaySessions) SetSessionOwnerID(_ context.Context, tenantID uint
 func (f *fakeGatewaySessions) AgentQA(_ context.Context, req *types.QARequest, bus *event.EventBus) error {
 	f.mu.Lock()
 	f.qaRequests = append(f.qaRequests, req)
+	f.agentCalls++
+	f.mu.Unlock()
+	if f.script == nil {
+		return nil
+	}
+	return f.script(bus, req)
+}
+
+func (f *fakeGatewaySessions) KnowledgeQA(_ context.Context, req *types.QARequest, bus *event.EventBus) error {
+	f.mu.Lock()
+	f.qaRequests = append(f.qaRequests, req)
+	f.kbCalls++
 	f.mu.Unlock()
 	if f.script == nil {
 		return nil
@@ -249,9 +267,13 @@ func TestChatCompletionsQARequestSemantics(t *testing.T) {
 	rec := serveCompletions(t, fakes, simpleCompletionsBody(), "user-9")
 	require.Equal(t, http.StatusOK, rec.Code)
 
+	// publishedAgent defaults to quick-answer: the turn must land on the
+	// RAG pipeline (KnowledgeQA), never the ReAct engine (web-chat parity).
 	fakes.sessions.mu.Lock()
-	reqs := fakes.sessions.qaRequests
+	reqs, kbCalls, agentCalls := fakes.sessions.qaRequests, fakes.sessions.kbCalls, fakes.sessions.agentCalls
 	fakes.sessions.mu.Unlock()
+	require.Equal(t, 1, kbCalls)
+	require.Equal(t, 0, agentCalls)
 	require.Len(t, reqs, 1)
 	req := reqs[0]
 	assert.False(t, req.TurnLeaseHeld, "the service takes the turn lease itself (IM/MCP parity)")
@@ -261,6 +283,97 @@ func TestChatCompletionsQARequestSemantics(t *testing.T) {
 	assert.Equal(t, "sess-1", req.Session.ID)
 	assert.Equal(t, "user-1", req.UserMessageID)
 	assert.Equal(t, "assistant-2", req.AssistantMessageID)
+}
+
+// TestChatCompletionsRoutesByAgentMode pins the web-chat routing contract on
+// the gateway: the frozen snapshot's agent_mode picks the service, exactly
+// like internal/handler/session/qa.go does for the frontend.
+func TestChatCompletionsRoutesByAgentMode(t *testing.T) {
+	build := func(mode string) *fakeGatewaySessions {
+		agent := publishedAgent("agt-1", "Doc QA", true)
+		agent.Config.AgentMode = mode
+		fakes := completionsFakes{
+			agents:   &fakeAgentService{agents: []*types.CustomAgent{agent}},
+			sessions: &fakeGatewaySessions{script: answerScript},
+			messages: &fakeGatewayMessages{},
+		}
+		rec := serveCompletions(t, fakes, simpleCompletionsBody(), "user-9")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return fakes.sessions
+	}
+
+	sessions := build(types.AgentModeQuickAnswer)
+	sessions.mu.Lock()
+	kb, agent := sessions.kbCalls, sessions.agentCalls
+	sessions.mu.Unlock()
+	assert.Equal(t, 1, kb, "quick-answer must run KnowledgeQA")
+	assert.Equal(t, 0, agent, "quick-answer must not run the ReAct engine")
+
+	sessions = build(types.AgentModeSmartReasoning)
+	sessions.mu.Lock()
+	kb, agent = sessions.kbCalls, sessions.agentCalls
+	sessions.mu.Unlock()
+	assert.Equal(t, 0, kb, "smart-reasoning must not run the RAG pipeline")
+	assert.Equal(t, 1, agent, "smart-reasoning must run the ReAct engine")
+}
+
+// kbAsyncScript mirrors the real KnowledgeQA contract: the service returns
+// right after initiating the pipeline (session_knowledge_qa.go logs
+// "initiated" and returns), and answer chunks keep streaming on the bus
+// afterwards. The delayed final answer makes the early service return
+// deterministic — exactly the race that used to make the gateway aggregate
+// an empty answer and cancel the in-flight LLM stream.
+func kbAsyncScript(bus *event.EventBus, _ *types.QARequest) error {
+	emit := func(typ event.EventType, data interface{}) error {
+		return bus.Emit(context.Background(), event.Event{Type: typ, Data: data})
+	}
+	if err := emit(event.EventAgentReferences, event.AgentReferencesData{
+		References: []*types.SearchResult{{ID: "r1", KnowledgeID: "k1", KnowledgeTitle: "手册", ChunkIndex: 2}},
+	}); err != nil {
+		return err
+	}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = emit(event.EventAgentFinalAnswer, event.AgentFinalAnswerData{
+			Content: "进入APP后点击【注册账号】即可注册。",
+			Done:    true,
+		})
+	}()
+	return nil
+}
+
+// TestChatCompletionsQuickAnswerWaitsForAsyncPipeline pins the KnowledgeQA
+// wait contract: the service return is not a completion signal, so the
+// gateway must keep waiting for the final answer chunk instead of answering
+// "No answer could be produced" and cancelling the stream.
+func TestChatCompletionsQuickAnswerWaitsForAsyncPipeline(t *testing.T) {
+	fakes := completionsFakes{
+		agents:   &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
+		sessions: &fakeGatewaySessions{script: kbAsyncScript},
+		messages: &fakeGatewayMessages{},
+	}
+	rec := serveCompletions(t, fakes, simpleCompletionsBody(), "user-9")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp ChatCompletionResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Choices)
+	assert.Contains(t, resp.Choices[0].Message.Content, "注册账号")
+	assert.NotContains(t, resp.Choices[0].Message.Content, "No answer could be produced")
+	assert.Contains(t, resp.Choices[0].Message.Content, "参考来源",
+		"pre-answer references ride in the citations footer")
+}
+
+// TestChatCompletionsQuickAnswerStreamWaitsForAsyncPipeline is the streaming
+// twin: the frame must stay open until the final answer chunk arrives.
+func TestChatCompletionsQuickAnswerStreamWaitsForAsyncPipeline(t *testing.T) {
+	rec := serveCompletions(t, streamFakes(kbAsyncScript), streamBody("agt-1"), "user-9")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	payload := rec.Body.String()
+	assert.Contains(t, payload, "注册账号")
+	assert.NotContains(t, payload, "No answer could be produced")
+	assert.True(t, strings.HasSuffix(strings.TrimSpace(payload), "[DONE]"))
 }
 
 func TestChatCompletionsNameAliasAnd404(t *testing.T) {
@@ -455,8 +568,10 @@ func TestChatCompletionsClientToolsIgnored(t *testing.T) {
 func TestChatCompletionsClientToolsBridged(t *testing.T) {
 	body := `{"model":"agt-1","stream":false,"tools":[{"type":"function","function":{"name":"read_file","description":"Reads a file","parameters":{"type":"object","properties":{}}}}],` +
 		`"messages":[{"role":"user","content":"hi"}]}`
+	agent := publishedAgent("agt-1", "Doc QA", true)
+	agent.Config.AgentMode = types.AgentModeSmartReasoning
 	fakes := completionsFakes{
-		agents:   &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
+		agents:   &fakeAgentService{agents: []*types.CustomAgent{agent}},
 		sessions: &fakeGatewaySessions{script: answerScript},
 		messages: &fakeGatewayMessages{},
 	}
@@ -474,6 +589,32 @@ func TestChatCompletionsClientToolsBridged(t *testing.T) {
 	require.Len(t, qa.ClientTools, 1)
 	assert.Equal(t, "read_file", qa.ClientTools[0].Name)
 	assert.True(t, qa.Suspendable, "bridge turns park the run on client-tool calls")
+}
+
+// TestChatCompletionsQuickAnswerIgnoresClientTools pins the M3-1 corollary:
+// quick-answer models run the RAG pipeline, which cannot call client tools,
+// so the tools are counted as ignored instead of arming a bridge that can
+// never fire.
+func TestChatCompletionsQuickAnswerIgnoresClientTools(t *testing.T) {
+	body := `{"model":"agt-1","stream":false,"tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}],` +
+		`"messages":[{"role":"user","content":"hi"}]}`
+	fakes := completionsFakes{
+		agents:   &fakeAgentService{agents: []*types.CustomAgent{publishedAgent("agt-1", "Doc QA", true)}},
+		sessions: &fakeGatewaySessions{script: answerScript},
+		messages: &fakeGatewayMessages{},
+	}
+	rec := serveCompletions(t, fakes, body, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ChatCompletionResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Meta)
+	assert.Equal(t, 1, resp.Meta.ClientToolsIgnored)
+	assert.Equal(t, FinishStop, resp.Choices[0].FinishReason)
+	fakes.sessions.mu.Lock()
+	qa := fakes.sessions.qaRequests[len(fakes.sessions.qaRequests)-1]
+	fakes.sessions.mu.Unlock()
+	assert.Empty(t, qa.ClientTools)
+	assert.False(t, qa.Suspendable)
 }
 
 func TestChatCompletionsClientToolsInvalidSpec(t *testing.T) {

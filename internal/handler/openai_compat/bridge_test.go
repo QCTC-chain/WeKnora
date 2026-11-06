@@ -161,6 +161,7 @@ func bridgeScript(bus *event.EventBus, _ *types.QARequest) error {
 
 func gatewayAgentWithPolicy(id, policy string) *types.CustomAgent {
 	agent := publishedAgent(id, "Doc QA", true)
+	agent.Config.AgentMode = types.AgentModeSmartReasoning
 	agent.Config.GatewayToolPolicy = policy
 	return agent
 }

@@ -779,21 +779,43 @@ func (h *GatewayHandler) runGatewayTurnStream(
 	reason := "completed"
 	select {
 	case <-translator.done:
-		// Answer events arrived; give the completion event a grace window
-		// for usage/references (same as the non-stream caller).
-		grace := time.NewTimer(askCompleteWait)
+		if agent.IsAgentMode() {
+			// Answer events arrived; give the completion event a grace
+			// window for usage/references (same as the non-stream caller).
+			grace := time.NewTimer(askCompleteWait)
+			select {
+			case <-translator.complete:
+			case <-runCtx.Done():
+				reason = timeoutReason(ctx, h.gateway)
+			case <-grace.C:
+				logger.Warnf(ctx, "[gateway] stream: completion grace elapsed: session=%s", session.ID)
+			}
+			grace.Stop()
+		}
+		// Quick-answer pipeline (KnowledgeQA): the final answer chunk closed
+		// done and references already arrived (pre-answer); no completion
+		// event follows, so waiting out the grace would only delay the
+		// finish frame.
+	case <-translator.complete:
+	case <-qaFinished:
+		if agent.IsAgentMode() {
+			// QA service returned without emitting events: surface the empty
+			// answer instead of waiting out the full budget.
+			break
+		}
+		// KnowledgeQA returns right after initiating the async pipeline
+		// (session_knowledge_qa.go logs "initiated" and returns), so its
+		// return is NOT a completion signal — the answer is still streaming
+		// on the bus. Keep the frame open until the final answer chunk;
+		// closing here would finish with an empty answer and cancel the
+		// in-flight LLM stream. Setup failures still surface promptly:
+		// translator.fail closes done/complete with the error recorded.
 		select {
+		case <-translator.done:
 		case <-translator.complete:
 		case <-runCtx.Done():
 			reason = timeoutReason(ctx, h.gateway)
-		case <-grace.C:
-			logger.Warnf(ctx, "[gateway] stream: completion grace elapsed: session=%s", session.ID)
 		}
-		grace.Stop()
-	case <-translator.complete:
-	case <-qaFinished:
-		// AgentQA returned without emitting events: surface the empty
-		// answer instead of waiting out the full budget.
 	case <-runCtx.Done():
 		reason = timeoutReason(ctx, h.gateway)
 	}
