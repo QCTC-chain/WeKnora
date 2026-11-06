@@ -80,6 +80,14 @@
               v-if="formOf(row).policy === 'client_only'" class="gateway-agent-alert" theme="warning"
               :message="$t('agentEditor.gateway.policyClientOnlyHint')" />
             <div class="gateway-agent-actions">
+              <span v-if="hasUnpublishedConfigChanges(row.agent)" class="gateway-agent-stale">
+                <t-icon name="info-circle" />
+                {{ $t('agentEditor.gateway.staleConfigHint') }}
+              </span>
+              <t-button theme="primary" size="small" variant="outline" :loading="row.submitting"
+                :disabled="row.submitting" @click="republishRow(row)">
+                {{ $t('agentEditor.gateway.republishButton') }}
+              </t-button>
               <t-button theme="primary" size="small" :loading="row.submitting"
                 :disabled="!row.dirty || row.submitting" @click="saveRow(row)">
                 {{ $t('common.save') }}
@@ -121,7 +129,7 @@ import { docsUrl } from '@/utils/docsUrl'
 import { useAuthStore } from '@/stores/auth'
 import { integrationSectionKey } from '@/config/settingsRoute'
 import {
-  listAgents, publishAgent,
+  listAgents, publishAgent, hasUnpublishedConfigChanges,
   type CustomAgent, type GatewayPublishScope, type GatewayToolPolicy,
 } from '@/api/agent'
 
@@ -260,6 +268,27 @@ async function saveRow(row: AgentRow) {
     // the backend on the next load.
     row.form.published = !!row.agent.published
     row.dirty = false
+    MessagePlugin.error(e?.message || t('agent.messages.saveFailed'))
+  } finally {
+    row.submitting = false
+  }
+}
+
+async function republishRow(row: AgentRow) {
+  // 重新发布 = 刷新快照 + 版本号 +1，只带 { published: true }，不携带 scope/policy/sunset，
+  // 也不会动 row.form（保留用户未保存的治理修改）。快照冻结的是数据库里的草稿 config，
+  // 因此编辑器先保存、再点这里的顺序才生效。
+  if (row.submitting) return
+  row.submitting = true
+  try {
+    const result = await publishAgent(row.agent.id, { published: true })
+    const updated = result?.data
+    if (!updated?.id) throw new Error(result?.message || t('agent.messages.saveFailed'))
+    row.agent = updated
+    MessagePlugin.success(
+      t('agentEditor.gateway.republishSuccess', { version: updated.gateway_version ?? 0 }),
+    )
+  } catch (e: any) {
     MessagePlugin.error(e?.message || t('agent.messages.saveFailed'))
   } finally {
     row.submitting = false
@@ -460,6 +489,17 @@ function openDocs() {
 .gateway-agent-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.gateway-agent-stale {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--td-warning-color-6, #e37318);
 }
 
 .gateway-agents-others {

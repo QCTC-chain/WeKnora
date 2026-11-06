@@ -1901,6 +1901,8 @@ import AssistantActionButton from '@/components/assistant/AssistantActionButton.
 import {
   createAgent,
   updateAgent,
+  publishAgent,
+  hasUnpublishedConfigChanges,
   listIMChannels,
   type CustomAgent,
   type PlaceholderDefinition,
@@ -5178,11 +5180,31 @@ const handleSave = async () => {
       emit('success');
       handleClose();
       notifyAllowedToolsWarnings(updated?.allowed_tools_warnings);
+      void republishIfStale(updated);
     }
   } catch (e: any) {
     MessagePlugin.error(e?.message || t('agent.messages.saveFailed'));
   } finally {
     saving.value = false;
+  }
+};
+
+// 保存后：若该智能体已发布为模型且草稿已偏离发布快照，直接静默重新发布
+// （刷新快照 + 版本+1），保证 DSH 等网关调用方下次请求即用新配置。网关侧
+// 执行的是 published_config 快照，不重新发布的话调用方仍按旧配置运行。
+// 对比直接用 PUT 响应里的新 config 与未变的 gateway_snapshot。
+const republishIfStale = async (updated: any) => {
+  const saved = updated?.data as CustomAgent | undefined;
+  if (!saved?.id || !hasUnpublishedConfigChanges(saved)) return;
+  const currentVersion = saved.gateway_version ?? 0;
+  try {
+    const result = await publishAgent(saved.id, { published: true });
+    MessagePlugin.success(t(
+      'agentEditor.gateway.republishSuccess',
+      { version: result?.data?.gateway_version ?? currentVersion + 1 },
+    ));
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('agent.messages.saveFailed'));
   }
 };
 </script>

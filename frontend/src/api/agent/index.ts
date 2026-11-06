@@ -169,6 +169,7 @@ export interface CustomAgent {
   gateway_scope?: string;         // 调用范围 private | org | tenant（缺省 tenant）
   gateway_version?: number;       // 发布版本号（/v1/models meta.version），0=从未发布
   deprecation_sunset?: string;    // 弃用时间（RFC3339），过后网关按未发布处理
+  gateway_snapshot?: CustomAgentConfig; // 发布时冻结的配置快照（published_config）；M1 时代发布的老数据没有快照
 }
 
 // ===== 模型网关发布治理（M2-a / M3-1） =====
@@ -190,6 +191,28 @@ export interface GatewayPublishPayload {
 // 重新发布会刷新配置快照并递增版本号；纯治理修改不影响版本号。
 export function publishAgent(id: string, data: GatewayPublishPayload) {
   return patch<{ data: CustomAgent; message?: string }>(`/api/v1/agents/${id}`, data);
+}
+
+// ===== 发布快照一致性（编辑器保存提示 / 发布页共用） =====
+
+// 规范化 JSON：键排序后序列化，键序不影响比较结果（config 与 gateway_snapshot
+// 在后端合并序列化时字段顺序可能不同）。
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value ?? null);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
+}
+
+// 草稿 config 是否已偏离已发布快照 gateway_snapshot：仅对"已发布且有快照"的智能体成立。
+// M1 时代发布的老数据没有快照，网关直接执行草稿，按定义不存在"未发布的修改"。
+export function hasUnpublishedConfigChanges(
+  agent: Pick<CustomAgent, 'published' | 'config' | 'gateway_snapshot'>,
+): boolean {
+  if (!agent?.published || !agent.gateway_snapshot) return false;
+  return canonicalJson(agent.config ?? {}) !== canonicalJson(agent.gateway_snapshot);
 }
 
 // PATCH /agents/:id 的网关执行参数：发布页直接修这些参数，先落配置再重新发布，
