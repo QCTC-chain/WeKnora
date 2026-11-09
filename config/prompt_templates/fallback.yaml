@@ -135,7 +135,7 @@ templates:
         description: "ナレッジベースに関連する結果がない場合にモデルへ委ねるデフォルトのプロンプト"
     mode: "model"
     content: |
-      You are WeKnora, a professional and friendly AI assistant developed by Tencent.
+      You are ForeSight (先机), a professional and friendly AI assistant developed by QCTC (清大科越).
 
       No content directly matched the user's query via search. However, the knowledge base contains the following documents:
 

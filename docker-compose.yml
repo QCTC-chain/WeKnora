@@ -55,6 +55,9 @@ services:
       - data-files:/data/files
       - docreader-tmp:/tmp/docreader:ro
       - ./config/config.yaml:/app/config/config.yaml
+      # 系统提示词模板：挂载后直接改宿主机 config/prompt_templates/*.yaml，
+      # 重启容器即可生效，无需重新构建镜像（模板在启动时加载一次）
+      - ./config/prompt_templates:/app/config/prompt_templates:ro
       # Docker 沙箱默认关闭（见 WEKNORA_SANDBOX_DOCKER_ENABLED）。需要本机 daemon 时
       # 同时设 true 并挂载实际 socket——这等同宿主机 root，仅私有化单机。
       # 入口脚本会按 socket GID 把 appuser 加入对应组（compose group_add 在 gosu 后无效）。
