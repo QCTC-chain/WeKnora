@@ -14,7 +14,10 @@
     export WEKNORA_API_KEY=sk-xxxx          # 或 export WEKNORA_JWT=<登录token>
     export WEKNORA_AGENT_ID=ag-xxxx
     python3 scripts/export_kb_generated_qa.py --kb-id <知识库ID>
-    python3 scripts/export_kb_generated_qa.py --kb-id <id> --output out.jsonl --limit 20
+    python3 scripts/export_kb_generated_qa.py --kb-id <id> --output out.jsonl --limit 20 -j 4 --retry-failed
+    python3 scripts/export_kb_generated_qa.py --kb-id <id> --shard-size 20000 -j 8 --progress-every 100
+                                            # 几十万级问题:分片输出(每片 2 万条),多线程,
+                                            # 降频打印进度;断点续跑自动读取所有分片
 
 对应后端接口(见 internal/router/routes_knowledge.go / routes_chat.go):
     GET  /api/v1/knowledge-bases/{kb_id}            知识库详情
@@ -30,10 +33,12 @@ import json
 import os
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 DEFAULT_BASE_URL = "http://localhost:8080"
@@ -248,7 +253,11 @@ def ask_question(client, query, kb_id, knowledge_id=None, agent_id=None):
 
 
 def iter_generated_questions(client, kb_id, max_docs=None, doc_filter=None):
-    """遍历知识库下所有文档的分块,产出 (knowledge, chunk, question_dict)。"""
+    """遍历知识库下所有文档的分块,产出 (knowledge, chunk, question_dict)。
+
+    knowledge/chunk 均为瘦身后的最小字段字典(几十万级问题时避免内存膨胀):
+    knowledge = {id, title};chunk = {id, chunk_index, content(截断至200字符)}
+    """
     page, seen_docs = 1, 0
     while True:
         payload = client.list_knowledges(kb_id, page=page, page_size=PAGE_SIZE)
@@ -264,16 +273,19 @@ def iter_generated_questions(client, kb_id, max_docs=None, doc_filter=None):
             seen_docs += 1
             if max_docs and seen_docs > max_docs:
                 return
-            yield from iter_chunk_questions(client, kb_item)
+            slim_knowledge = {
+                "id": kid,
+                "title": kb_item.get("title") or kb_item.get("Title"),
+            }
+            yield from iter_chunk_questions(client, kid, slim_knowledge)
         total = payload.get("total") or 0
         if page * PAGE_SIZE >= total:
             break
         page += 1
 
 
-def iter_chunk_questions(client, knowledge):
-    """遍历单个文档的分块,产出 (chunk, question_dict)。"""
-    knowledge_id = knowledge.get("ID") or knowledge.get("id")
+def iter_chunk_questions(client, knowledge_id, knowledge):
+    """遍历单个文档的分块,产出 (knowledge, chunk, question_dict)。chunk 瘦身。"""
     page = 1
     while True:
         payload = client.list_chunks(knowledge_id, page=page, page_size=PAGE_SIZE)
@@ -285,8 +297,16 @@ def iter_chunk_questions(client, knowledge):
         if not chunks:
             return
         for chunk in chunks:
-            for q in extract_questions(chunk):
-                yield knowledge, chunk, q
+            questions = extract_questions(chunk)
+            if not questions:
+                continue
+            slim_chunk = {
+                "id": chunk.get("id"),
+                "chunk_index": chunk.get("chunk_index"),
+                "content": (chunk.get("content") or "")[:200],
+            }
+            for q in questions:
+                yield knowledge, slim_chunk, q
         total = payload.get("total") or 0
         if page * PAGE_SIZE >= total:
             return
@@ -311,22 +331,141 @@ def extract_questions(chunk):
     return out
 
 
-def load_done_keys(output_path):
-    """读取已有输出文件,返回已完成 (chunk_id, question) 集合,用于断点续跑。"""
-    done = set()
-    if not output_path.exists():
-        return done
-    with output_path.open("r", encoding="utf-8") as f:
+def record_is_failed(rec):
+    """判断一条历史记录是否失败:有错误、答案为空或为输出预算耗尽的回退文案。"""
+    answer = rec.get("answer") or ""
+    return bool(rec.get("error")) or not answer.strip() or EmptyAnswerBudgetMarker in answer
+
+
+def count_lines(path):
+    """统计文件中非空行数(用于分片轮转判断)。"""
+    total = 0
+    with path.open("r", encoding="utf-8", errors="replace") as f:
         for line in f:
-            line = line.strip()
-            if not line:
-                continue
+            if line.strip():
+                total += 1
+    return total
+
+
+def existing_output_files(output_path, shard_size):
+    """列出当前的输出文件:单文件模式返回 base;分片模式返回所有 part 文件(+遗留 base)。"""
+    files = []
+    if shard_size > 0:
+        pattern = f"{output_path.stem}.part*{output_path.suffix}"
+        files = sorted(output_path.parent.glob(pattern))
+        if output_path.exists():
+            files.insert(0, output_path)  # 遗留单文件也算入续跑读取范围
+    elif output_path.exists():
+        files = [output_path]
+    return files
+
+
+class ShardedJsonlWriter:
+    """按记录数分片的 JSONL 追加写入器;shard_size<=0 时写单个文件。
+
+    - 每写一条立即 flush(保证断点续跑完整性;写入本身微秒级,不是瓶颈)
+    - 达到 shard_size 后自动关闭当前分片、打开下一个 part 文件
+    """
+
+    def __init__(self, base_path, shard_size):
+        self.base = base_path
+        self.shard_size = max(0, shard_size)
+        self._fh = None
+        self._count = 0
+        if self.shard_size <= 0:
+            self._current = base_path
+        else:
+            self._current = self._next_shard_path()
+
+    def _shard_file(self, n):
+        return self.base.with_name(f"{self.base.stem}.part{n:04d}{self.base.suffix}")
+
+    def _next_shard_path(self):
+        """确定下一个要写的分片:有未满的旧分片则续写,否则开新分片。"""
+        existing = sorted(self.base.parent.glob(
+            f"{self.base.stem}.part*{self.base.suffix}"))
+        if existing:
+            last = existing[-1]
             try:
-                rec = json.loads(line)
-                done.add((rec.get("chunk_id"), rec.get("question")))
-            except json.JSONDecodeError:
-                continue
-    return done
+                n = int(last.stem.rsplit(".part", 1)[1]) + 1
+            except ValueError:
+                n = len(existing) + 1
+            filled = count_lines(last)
+            if filled < self.shard_size:
+                self._count = filled
+                return last
+        self._count = 0
+        return self._shard_file(n if existing else 1)
+
+    def _ensure_open(self):
+        if self._fh is None:
+            self._current.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = self._current.open("a", encoding="utf-8")
+
+    def write(self, line):
+        self._ensure_open()
+        self._fh.write(line)
+        self._fh.flush()
+        self._count += 1
+        if self.shard_size > 0 and self._count >= self.shard_size:
+            self._fh.close()
+            self._fh = None
+            n = int(self._current.stem.rsplit(".part", 1)[1]) + 1
+            self._current = self._shard_file(n)
+            self._count = 0
+
+    def close(self):
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
+
+def load_done_keys(files, include_failed=False):
+    """读取输出文件(含所有分片),返回 (已完成key集合, 失败key集合, 残缺行数)。
+
+    include_failed=True 时失败记录不计入已完成(供 --retry-failed 重试)。
+    """
+    done, failed, corrupt = set(), set(), 0
+    for path in files:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    corrupt += 1  # 中断产生的残缺行
+                    continue
+                key = (rec.get("chunk_id"), rec.get("question"))
+                if record_is_failed(rec):
+                    failed.add(key)
+                    if include_failed:
+                        continue
+                done.add(key)
+    return done, failed, corrupt
+
+
+def purge_bad_lines(files, failed_keys=None):
+    """原子地清理各输出文件:移除残缺行;failed_keys 非空时一并移除旧失败记录。"""
+    dropped_failed = dropped_corrupt = 0
+    for path in files:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with path.open("r", encoding="utf-8", errors="replace") as src, \
+                tmp.open("w", encoding="utf-8") as dst:
+            for line in src:
+                stripped = line.strip()
+                try:
+                    rec = json.loads(stripped)
+                except json.JSONDecodeError:
+                    dropped_corrupt += 1
+                    continue  # 残缺行丢弃,对应问题会重新生成
+                if failed_keys and (rec.get("chunk_id"), rec.get("question")) in failed_keys:
+                    dropped_failed += 1
+                    continue
+                dst.write(line)
+        os.replace(tmp, path)
+    return dropped_failed, dropped_corrupt
 
 
 def build_record(kb, knowledge, chunk, q, result, session_id, duration_ms):
@@ -391,11 +530,28 @@ def main():
                       help="登录 JWT(或环境变量 WEKNORA_JWT)")
     parser.add_argument("--output", default=None,
                         help="输出 JSONL 路径,默认 scripts/output/<kb_id>_generated_qa.jsonl")
+    parser.add_argument("--shard-size", type=int, default=0,
+                        help="每个分片文件的记录数,0=单文件(默认)。十万级以上规模建议设置"
+                             "(如 20000),输出为 <output前缀>.part0001.jsonl 等;续跑自动读取"
+                             "所有分片。注意:从单文件切换到分片后,旧单文件进度不再续接")
+    parser.add_argument("--progress", choices=["bar", "every", "none"], default="bar",
+                        help="进度展示方式: bar=单行进度条实时刷新(默认,tty 下);"
+                             "every=每 --progress-every 条打印一行(适合重定向到日志);"
+                             "none=静默,仅结束汇总。stdout 被重定向时 bar 自动降级为 every")
+    parser.add_argument("--progress-every", type=int, default=1,
+                        help="every 模式下每完成多少个问题打印一行(失败始终打印)。"
+                             "大规模建议 50~200")
     parser.add_argument("--limit", type=int, default=None, help="最多处理的问题数量")
+    parser.add_argument("--concurrency", "-j", type=int, default=1,
+                        help="并发线程数(多任务执行)。每个问题独立会话互不干扰;"
+                             "过大可能触发服务端限流或拖慢模型响应,建议 2~8")
     parser.add_argument("--max-docs", type=int, default=None, help="最多遍历的文档数量")
     parser.add_argument("--doc-id", action="append", default=[], help="仅处理指定文档 ID(可重复)")
     parser.add_argument("--dedupe", action="store_true", help="跨分块去重相同的问题文本")
     parser.add_argument("--no-resume", action="store_true", help="忽略已有输出,重新开始")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="重试历史失败记录(报错/空答案/输出预算耗尽),成功后覆盖旧记录;"
+                             "适用于换用 --agent-id 后重跑之前预算耗尽的问题")
     parser.add_argument("--insecure", action="store_true", help="跳过 HTTPS 证书校验")
     parser.add_argument("--timeout", type=int, default=60, help="普通 HTTP 请求超时(秒)")
     parser.add_argument("--dry-run", action="store_true", help="仅列出问题,不生成答案")
@@ -406,6 +562,15 @@ def main():
               file=sys.stderr)
         sys.exit(2)
 
+    if args.concurrency < 1 or args.concurrency > 32:
+        print("错误: --concurrency 取值范围 1~32", file=sys.stderr)
+        sys.exit(2)
+    if args.shard_size < 0:
+        print("错误: --shard-size 不能为负", file=sys.stderr)
+        sys.exit(2)
+    if args.progress_every < 1:
+        print("错误: --progress-every 至少为 1", file=sys.stderr)
+        sys.exit(2)
     output_path = Path(args.output) if args.output else (
         Path(__file__).resolve().parent / "output" / f"{args.kb_id}_generated_qa.jsonl")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -466,46 +631,153 @@ def main():
             print(f"{i:4d}. [{doc_title}] {q['question']}")
         return
 
-    # 3. 断点续跑:跳过已完成的 (chunk_id, question)
-    done = set() if args.no_resume else load_done_keys(output_path)
+    # 3. 断点续跑:跳过已完成的 (chunk_id, question);
+    #    --retry-failed 时历史失败记录(预算耗尽/报错/空答案)会被清除并重新生成
+    out_files = existing_output_files(output_path, args.shard_size)
+    done, failed_keys, corrupt = (set(), set(), 0)
+    if not args.no_resume and out_files:
+        done, failed_keys, corrupt = load_done_keys(out_files, include_failed=args.retry_failed)
     pending = [t for t in tasks if (t[1].get("id"), t[2]["question"]) not in done]
+    if corrupt:
+        _, dropped_corrupt = purge_bad_lines(out_files)
+        print(f"检测到 {corrupt} 条中断残缺行,已清理,对应问题将重新生成")
+    if args.retry_failed and failed_keys:
+        dropped, _ = purge_bad_lines(out_files, failed_keys)
+        print(f"重试历史失败记录: 清除 {dropped} 条旧失败记录,将重新生成")
     if len(pending) < len(tasks):
         print(f"断点续跑: 已完成 {len(tasks) - len(pending)} 个,待处理 {len(pending)} 个")
 
-    # 4. 逐个生成答案并写入 JSONL(每个问题独立会话,保证答案互不干扰)
+    # 4. 并发生成答案并写入 JSONL(每个问题独立会话,互不干扰;
+    #    并发时结果按完成顺序写入,断点续跑不依赖行序;
+    #    shard_size>0 时自动分片输出,避免单文件过大)
     ok_count, fail_count = 0, 0
-    with output_path.open("a", encoding="utf-8") as out:
-        for i, (knowledge, chunk, q) in enumerate(pending, 1):
-            query = q["question"]
-            print(f"[{i}/{len(pending)}] {query[:60]}{'...' if len(query) > 60 else ''}", end=" ")
-            start = time.time()
-            try:
-                result, session_id = ask_question(client, query, args.kb_id,
-                                                  knowledge.get("id") or knowledge.get("ID"),
-                                                  agent_id=args.agent_id)
-            except APIError as e:
-                result = {"answer": "", "thinking": "", "references": [],
-                          "assistant_message_id": "", "usage": None, "error": str(e)}
-                session_id = None
-            duration_ms = int((time.time() - start) * 1000)
+    total = len(pending)
+    io_lock = threading.Lock()  # 保护文件写入与进度打印
+    writer = ShardedJsonlWriter(output_path, args.shard_size)
+    if args.shard_size > 0:
+        print(f"分片输出: 每片 {args.shard_size} 条,前缀 {output_path}")
 
-            record = build_record(kb, knowledge, chunk, q, result, session_id, duration_ms)
-            out.write(json.dumps(record, ensure_ascii=False) + "\n")
-            out.flush()
+    # 进度展示: bar=单行进度条实时刷新;every=每 N 条一行;none=静默。
+    # stdout 被重定向时 bar 自动降级为 every,避免 \r 控制字符写进日志。
+    progress_mode = args.progress
+    if progress_mode == "bar" and not sys.stdout.isatty():
+        progress_mode = "every"
+        print("提示: 检测到 stdout 被重定向,进度条降级为批量打印(--progress-every)。",
+              file=sys.stderr)
+    bar_width = 28
+    last_bar_len = [0]  # 当前进度条行长度,供清行覆盖用
 
-            if result.get("error") or not result.get("answer"):
-                fail_count += 1
-                print(f"失败({duration_ms}ms): {result.get('error') or '答案为空'}")
-            elif EmptyAnswerBudgetMarker in result["answer"]:
-                fail_count += 1
-                print(f"失败({duration_ms}ms): 输出预算耗尽。"
-                      "请用 --agent-id 指定配置了大 max_completion_tokens 的智能体。")
-            else:
-                ok_count += 1
-                print(f"完成({duration_ms}ms, 引用{record['reference_count']}条)")
+    def fmt_duration(sec):
+        sec = max(0, int(sec))
+        if sec >= 3600:
+            return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
+        return f"{sec // 60:02d}:{sec % 60:02d}"
 
-    print(f"\n完成: 成功 {ok_count}, 失败 {fail_count}")
-    print(f"输出文件: {output_path}")
+    def draw_bar(finished, started_at):
+        pct = finished / total * 100 if total else 100.0
+        filled = int(bar_width * finished / total) if total else bar_width
+        bar = "█" * filled + "░" * (bar_width - filled)
+        elapsed = time.time() - started_at
+        rate = finished / elapsed if elapsed > 0.5 else 0
+        remain = (total - finished) / rate if rate > 0 else 0
+        line = (f"[{bar}] {finished}/{total} ({pct:5.1f}%) "
+                f"成功 {ok_count} 失败 {fail_count} | "
+                f"已用 {fmt_duration(elapsed)} 剩余约 {fmt_duration(remain)}")
+        sys.stdout.write("\r" + line)
+        last_bar_len[0] = len(line)
+        sys.stdout.flush()
+
+    def clear_bar():
+        if last_bar_len[0]:
+            sys.stdout.write("\r" + " " * last_bar_len[0] + "\r")
+            last_bar_len[0] = 0
+            sys.stdout.flush()
+
+    def run_one(idx, knowledge, chunk, q):
+        """处理单个问题,返回 (record, 状态, 附加信息)。线程安全(不共享可变状态)。"""
+        query = q["question"]
+        start = time.time()
+        try:
+            result, session_id = ask_question(client, query, args.kb_id,
+                                              knowledge.get("id") or knowledge.get("ID"),
+                                              agent_id=args.agent_id)
+        except APIError as e:
+            result = {"answer": "", "thinking": "", "references": [],
+                      "assistant_message_id": "", "usage": None, "error": str(e)}
+            session_id = None
+        except Exception as e:  # 非预期异常不拖垮整个任务
+            result = {"answer": "", "thinking": "", "references": [],
+                      "assistant_message_id": "", "usage": None,
+                      "error": f"{type(e).__name__}: {e}"}
+            session_id = None
+        duration_ms = int((time.time() - start) * 1000)
+        record = build_record(kb, knowledge, chunk, q, result, session_id, duration_ms)
+        return record, idx, query
+
+    try:
+        if args.concurrency == 1:
+            worker_pool = None
+            iterator = (run_one(i, k, c, q) for i, (k, c, q) in enumerate(pending, 1))
+        else:
+            worker_pool = ThreadPoolExecutor(max_workers=args.concurrency)
+            futures = [worker_pool.submit(run_one, i, k, c, q)
+                       for i, (k, c, q) in enumerate(pending, 1)]
+            iterator = (f.result() for f in as_completed(futures))
+
+        print(f"并发线程数: {args.concurrency}, 进度模式: {progress_mode}"
+              + (f"(每 {args.progress_every} 条)" if progress_mode == "every" else ""))
+        started_at = time.time()
+        try:
+            for record, idx, query in iterator:
+                preview = query[:60] + ('...' if len(query) > 60 else '')
+                with io_lock:
+                    writer.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    answer = record.get("answer") or ""
+                    if record.get("error") or not answer:
+                        reason = record.get("error") or "答案为空"
+                        fail_count += 1
+                    elif EmptyAnswerBudgetMarker in answer:
+                        reason = ("输出预算耗尽,请用 --agent-id 指定配置了大 "
+                                  "max_completion_tokens 的自建智能体")
+                        fail_count += 1
+                    else:
+                        reason = None
+                        ok_count += 1
+                    finished = ok_count + fail_count
+                    fail_line = (f"[{idx}/{total}] 失败({record['duration_ms']}ms): "
+                                 f"{reason} | {preview}") if reason else None
+                    if progress_mode == "bar":
+                        if fail_line:
+                            clear_bar()
+                            print(fail_line)
+                        draw_bar(finished, started_at)
+                    elif progress_mode == "every":
+                        if fail_line:
+                            print(fail_line)
+                        elif (args.progress_every <= 1
+                                or finished % args.progress_every == 0):
+                            print(f"[{finished}/{total}] "
+                                  f"完成({record['duration_ms']}ms, "
+                                  f"引用{record['reference_count']}条) | {preview}")
+                    # none: 静默
+        finally:
+            if progress_mode == "bar":
+                clear_bar()
+            if worker_pool is not None:
+                worker_pool.shutdown(wait=True, cancel_futures=True)
+    finally:
+        writer.close()
+
+    print(f"\n完成: 成功 {ok_count}, 失败 {fail_count}, 总计 {ok_count + fail_count}, "
+          f"耗时 {fmt_duration(time.time() - started_at)}")
+    if args.shard_size > 0:
+        parts = sorted(output_path.parent.glob(
+            f"{output_path.stem}.part*{output_path.suffix}"))
+        print(f"输出文件: {len(parts)} 个分片,前缀 {output_path}"
+              + (f"\n  合并查看: cat {output_path.parent}/{output_path.stem}.part*.jsonl > all.jsonl"
+                 if parts else ""))
+    else:
+        print(f"输出文件: {output_path}")
 
 
 if __name__ == "__main__":
