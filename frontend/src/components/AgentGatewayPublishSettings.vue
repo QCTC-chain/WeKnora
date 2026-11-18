@@ -415,8 +415,8 @@ async function handleSave() {
   gap: 16px;
   align-items: flex-start;
   padding: 16px;
-  border-radius: 9px;
-  background: var(--td-bg-color-secondarycontainer, var(--td-bg-color-container));
+  border-radius: var(--app-radius-md);
+  background: var(--td-bg-color-secondarycontainer);
 }
 
 .gateway-publish-row--stack {
@@ -430,7 +430,7 @@ async function handleSave() {
 }
 
 .gateway-publish-row-desc {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   color: var(--td-text-color-secondary);
   line-height: 1.6;
 }
@@ -443,7 +443,7 @@ async function handleSave() {
 }
 
 .gateway-publish-status-meta {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   color: var(--td-text-color-secondary);
 }
 
@@ -476,9 +476,9 @@ async function handleSave() {
 
 .gateway-endpoint-path {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   padding: 4px 8px;
-  border-radius: 6px;
+  border-radius: var(--app-radius-sm);
   background: var(--td-bg-color-secondarycontainer);
   color: var(--td-text-color-primary);
   word-break: break-all;
@@ -512,7 +512,7 @@ async function handleSave() {
 }
 
 .gateway-exec-label {
-  font-size: 13px;
+  font-size: var(--app-text-md);
   font-weight: 500;
   color: var(--td-text-color-primary);
 }
@@ -525,7 +525,7 @@ async function handleSave() {
 }
 
 .gateway-exec-none {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   color: var(--td-text-color-secondary);
 }
 

@@ -116,7 +116,7 @@ curl -N $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" \
 
 多模态:`content` 数组中的 `image_url` 仅在智能体开启图片能力时生效(每次最多 4 张、单张 ≤10MB),否则忽略并在 `meta.warnings` 提示。
 
-**客户端工具(M3-1)**:请求可带 `tools[]`(仅 `type:"function"`),把调用方自己的函数工具桥接进智能体运行——模型决定调用时,响应以 `finish_reason:"tool_calls"` 挂起,详见[客户端工具桥](#客户端工具桥m3-1)。受智能体的 `gateway_tool_policy` 控制:策略为 `none` 时 `tools[]` 计数后忽略(在 `meta.client_tools_ignored` 回显)。
+**客户端工具(M3-1)**:请求可带 `tools[]`(仅 `type:"function"`),把调用方自己的函数工具桥接进智能体运行——模型决定调用时,响应以 `finish_reason:"tool_calls"` 挂起,详见[客户端工具桥](#客户端工具桥-m3-1)。受智能体的 `gateway_tool_policy` 控制:策略为 `none` 时 `tools[]` 计数后忽略(在 `meta.client_tools_ignored` 回显)。
 
 ### POST /v1/messages(Anthropic 兼容,M2-5)
 
@@ -216,7 +216,7 @@ Prometheus 文本格式 exposition(与网关共用 Bearer / `X-API-Key` 鉴权),
 
 ## M1/M2 已知限制
 
-- 客户端 `tools` 默认**被忽略**仅当智能体的 `gateway_tool_policy` 为 `none`(M1 行为,数量在 `meta.client_tools_ignored` 回显);其余策略下工具调用经 `finish_reason:"tool_calls"` 桥接,见[客户端工具桥](#客户端工具桥m3-1)。
+- 客户端 `tools` 默认**被忽略**仅当智能体的 `gateway_tool_policy` 为 `none`(M1 行为,数量在 `meta.client_tools_ignored` 回显);其余策略下工具调用经 `finish_reason:"tool_calls"` 桥接,见[客户端工具桥](#客户端工具桥-m3-1)。
 - 无跨请求记忆(除非用 `X-WeKnora-Session-ID` 续接);`temperature` 等采样参数以智能体配置为准(在 `meta.ignored_params` 回显)。
 - `usage` 为内部 agent loop 各轮 LLM 调用的**累计值**(含检索、工具轮),通常显著大于客户端按输入长度估算的预期。
 - 长任务受 `GATEWAY_REQUEST_TIMEOUT` 约束,超时时流式路径返回已产生的部分内容并在 `meta.warnings` 标注;非流式路径同样返回部分内容。

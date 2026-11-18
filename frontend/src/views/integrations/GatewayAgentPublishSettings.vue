@@ -29,7 +29,7 @@
     <t-loading :loading="loading" show-overlay>
       <div class="gateway-agents-list">
         <div v-if="!loading && manageableRows.length === 0 && otherPublished.length === 0" class="gateway-agents-empty">
-          <t-icon name="cloud" class="gateway-agents-empty-icon" />
+          <t-icon name="cloud" size="32px" class="gateway-agents-empty-icon" />
           <p>{{ $t('integrations.gateway.empty') }}</p>
         </div>
 
@@ -335,8 +335,8 @@ function openDocs() {
   flex-direction: column;
   gap: 8px;
   padding: 16px;
-  border-radius: 9px;
-  background: var(--td-bg-color-secondarycontainer, var(--td-bg-color-container));
+  border-radius: var(--app-radius-md);
+  background: var(--td-bg-color-secondarycontainer);
 }
 
 .gateway-agents-card-title {
@@ -345,7 +345,7 @@ function openDocs() {
 }
 
 .gateway-agents-card-desc {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   color: var(--td-text-color-secondary);
   line-height: 1.6;
 }
@@ -376,9 +376,9 @@ function openDocs() {
 
 .gateway-endpoint-path {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   padding: 4px 8px;
-  border-radius: 6px;
+  border-radius: var(--app-radius-sm);
   background: var(--td-bg-color-container);
   color: var(--td-text-color-primary);
   word-break: break-all;
@@ -398,11 +398,10 @@ function openDocs() {
   gap: 8px;
   padding: 32px 16px;
   color: var(--td-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
 }
 
 .gateway-agents-empty-icon {
-  font-size: 32px;
   color: var(--td-text-color-placeholder);
 }
 
@@ -411,9 +410,9 @@ function openDocs() {
   flex-direction: column;
   gap: 12px;
   padding: 16px;
-  border-radius: 9px;
+  border-radius: var(--app-radius-md);
   border: 1px solid var(--td-component-border);
-  background: var(--td-bg-color-secondarycontainer, var(--td-bg-color-container));
+  background: var(--td-bg-color-secondarycontainer);
 
   &--published {
     border-color: var(--td-success-color-3);
@@ -446,7 +445,7 @@ function openDocs() {
 
 .gateway-agent-desc {
   margin-top: 4px;
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   color: var(--td-text-color-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -455,7 +454,7 @@ function openDocs() {
 
 .gateway-agent-creator {
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   color: var(--td-text-color-secondary);
 }
 
@@ -472,7 +471,7 @@ function openDocs() {
 }
 
 .gateway-agent-field-label {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   font-weight: 600;
   color: var(--td-text-color-primary);
 }
@@ -498,8 +497,8 @@ function openDocs() {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
-  color: var(--td-warning-color-6, #e37318);
+  font-size: var(--app-text-sm);
+  color: var(--td-warning-color-6);
 }
 
 .gateway-agents-others {
@@ -509,7 +508,7 @@ function openDocs() {
 }
 
 .gateway-agents-others-title {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   font-weight: 600;
   color: var(--td-text-color-secondary);
 }

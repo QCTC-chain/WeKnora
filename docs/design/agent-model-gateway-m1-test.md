@@ -88,7 +88,7 @@ cd <仓库根目录>
 # 开启网关(compose env_file 会把 .env 透传进 app 容器)
 grep -q '^GATEWAY_ENABLED=' .env && sed -i 's/^GATEWAY_ENABLED=.*/GATEWAY_ENABLED=true/' .env || echo 'GATEWAY_ENABLED=true' >> .env
 docker compose build app && docker compose up -d app
-docker compose ps app   # 等待 healthy;迁移 000135(postgres)/000052(sqlite)启动时自动执行
+docker compose ps app   # 等待 healthy;迁移 000138(postgres)/000054(sqlite)启动时自动执行
 ```
 
 ### 3.2 数据准备
