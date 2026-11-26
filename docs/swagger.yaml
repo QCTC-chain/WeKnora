@@ -7555,6 +7555,7 @@ definitions:
     - no_model
     - disabled
     - no_candidates
+    - no_query
     type: string
     x-enum-varnames:
     - RerankOutcomeOK
@@ -7566,6 +7567,7 @@ definitions:
     - RerankOutcomeNoModel
     - RerankOutcomeDisabled
     - RerankOutcomeNoCandidates
+    - RerankOutcomeNoQuery
   github_com_Tencent_WeKnora_internal_types.Resource:
     properties:
       description:

@@ -29,6 +29,12 @@ type sandboxConfigLookup interface {
 	Get(ctx context.Context, tenantID uint64, id string) (*types.TenantSandboxConfigEntity, error)
 }
 
+// asrModelLookup is the existence check an agent's speech-recognition selection
+// needs, kept narrow for the same reason as sandboxConfigLookup.
+type asrModelLookup interface {
+	GetModelByID(ctx context.Context, id string) (*types.Model, error)
+}
+
 // CustomAgentHandler defines the HTTP handler for custom agent operations
 type CustomAgentHandler struct {
 	service      interfaces.CustomAgentService
@@ -44,8 +50,11 @@ type CustomAgentHandler struct {
 	webSearchProviders interfaces.WebSearchProviderRepository
 	// audit records gateway publish governance changes (M2-a); nil in unit
 	// tests degrades to a log line, never to a failed publish.
-	audit   interfaces.AuditLogService
-	desktop bool
+	audit interfaces.AuditLogService
+	// asrModels validates an agent's speech-recognition selection. Optional in
+	// the same way as sandboxConfigs.
+	asrModels asrModelLookup
+	desktop   bool
 }
 
 // NewCustomAgentHandler creates a new custom agent handler instance
@@ -59,6 +68,7 @@ func NewCustomAgentHandler(
 	usableSkills *service.TenantSkillService,
 	webSearchProviders interfaces.WebSearchProviderRepository,
 	audit interfaces.AuditLogService,
+	models interfaces.ModelService,
 ) *CustomAgentHandler {
 	return &CustomAgentHandler{
 		service:            service,
@@ -69,6 +79,7 @@ func NewCustomAgentHandler(
 		usableSkills:       usableSkills,
 		webSearchProviders: webSearchProviders,
 		audit:              audit,
+		asrModels:          models,
 		desktop:            host.Desktop,
 	}
 }
@@ -398,11 +409,15 @@ func (h *CustomAgentHandler) CreateAgent(c *gin.Context) {
 		return
 	}
 	if err := authorizeAgentKnowledgeScope(ctx, req.Config); err != nil {
-		c.Error(err)
+		_ = c.Error(err)
 		return
 	}
 	if err := h.validateAgentSandboxConfig(ctx, req.Config); err != nil {
-		c.Error(err)
+		_ = c.Error(err)
+		return
+	}
+	if err := h.validateAgentASRModel(ctx, req.Config, ""); err != nil {
+		_ = c.Error(err)
 		return
 	}
 	if err := normalizeAgentReasoningEffort(&req.Config); err != nil {
@@ -862,11 +877,11 @@ func (h *CustomAgentHandler) validateAgentSkillNames(
 func (h *CustomAgentHandler) saveAgentUpdate(c *gin.Context, id string, req UpdateAgentRequest) {
 	ctx := c.Request.Context()
 	if err := authorizeAgentKnowledgeScope(ctx, req.Config); err != nil {
-		c.Error(err)
+		_ = c.Error(err)
 		return
 	}
 	if err := h.validateAgentSandboxConfig(ctx, req.Config); err != nil {
-		c.Error(err)
+		_ = c.Error(err)
 		return
 	}
 	if err := normalizeAgentReasoningEffort(&req.Config); err != nil {
@@ -882,6 +897,10 @@ func (h *CustomAgentHandler) saveAgentUpdate(c *gin.Context, id string, req Upda
 			return
 		}
 		_ = c.Error(errors.NewInternalServerError("Failed to update agent"))
+		return
+	}
+	if err := h.validateAgentASRModel(ctx, req.Config, existing.Config.ASRModelID); err != nil {
+		_ = c.Error(err)
 		return
 	}
 	toolWarnings, err := checkAgentAllowedTools(existing.Config.AllowedTools, &req.Config)
@@ -1075,7 +1094,7 @@ func (h *CustomAgentHandler) CopyAgent(c *gin.Context) {
 		return
 	}
 	if err := authorizeAgentKnowledgeScope(ctx, sourceAgent.Config); err != nil {
-		c.Error(err)
+		_ = c.Error(err)
 		return
 	}
 
@@ -1295,6 +1314,42 @@ func (h *CustomAgentHandler) validateAgentSandboxConfig(
 	}
 	if stored == nil {
 		return errors.NewBadRequestError("所选沙箱后端配置不存在，请重新选择")
+	}
+	return nil
+}
+
+// validateAgentASRModel rejects a speech-recognition selection the workspace
+// does not have, with the rule UpdateTenantDefaultSettings applies to the same
+// field: a newly selected ID must name an active ASR model.
+//
+// For the same reason as the sandbox selection, checking at save time is what
+// makes the mistake fixable: saved unchecked, a wrong ID only fails when the
+// agent is next dictated to, as a server error that names neither the agent
+// nor the setting. An ID kept from the stored agent is not re-checked, so a
+// model removed since does not block an unrelated change such as a rename.
+func (h *CustomAgentHandler) validateAgentASRModel(
+	ctx context.Context, cfg types.CustomAgentConfig, storedID string,
+) error {
+	id := cfg.ASRModelID
+	if id == "" || id == storedID || h.asrModels == nil {
+		return nil
+	}
+	if _, ok := types.TenantIDFromContext(ctx); !ok {
+		return errors.NewUnauthorizedError("Missing workspace context")
+	}
+	model, err := h.asrModels.GetModelByID(ctx, id)
+	if err != nil {
+		if err == service.ErrModelNotFound {
+			return errors.NewBadRequestError("asr_model_id: model not found in this workspace")
+		}
+		return errors.NewInternalServerError("Failed to verify the ASR model").
+			WithDetails(err.Error())
+	}
+	if !model.SupportsType(types.ModelTypeASR) {
+		return errors.NewBadRequestError("asr_model_id must be an ASR model")
+	}
+	if model.Status != types.ModelStatusActive {
+		return errors.NewBadRequestError("asr_model_id: model is not active")
 	}
 	return nil
 }
